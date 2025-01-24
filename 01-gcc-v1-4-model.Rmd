@@ -1,12 +1,12 @@
 ---
-title: "04-gam-cc-obs-gridded.Rmd"
+title: "01-gcc-v1-4-model.Rmd"
 author: "Whitney Friedman"
-date: '2022-05-17'
+date: '2024-05'
 output: html_document
 ---
-# Random Forest Model of observed coral cover
-- % coral cover data from global surveys, aligned with 5km LRP cells
-- environmental co-variates aggregated to 5km LRP cells
+
+# GCC v1.4 model
+This file generate and summarizes the gcc v1.4 model
 
 # Setup
 ```{r setup, include=TRUE}
