@@ -1,0 +1,849 @@
+---
+title: "04-gam-cc-obs-gridded.Rmd"
+author: "Whitney Friedman"
+date: '2022-05-17'
+output: html_document
+---
+# Random Forest Model of observed coral cover
+- % coral cover data from global surveys, aligned with 5km LRP cells
+- environmental co-variates aggregated to 5km LRP cells
+
+# Setup
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+```
+
+## load libraries & functions
+```{r message=FALSE, warning=FALSE, include=TRUE}
+library(here)
+source(here("00-load-cc-libraries.R"))
+library(corrplot)
+library(arm)
+library(optimx)
+library(mgcv)
+library(mgcViz) # better GAM visualizations
+library(ranger)
+library(randomForest)
+library(sf)
+library(RColorBrewer)
+conflict_prefer("view", "tibble")
+library(skimr)
+library(janitor)
+library(kableExtra)
+
+
+# Load functions
+source(here( "00-load-cc-functions.R"))
+```
+
+## ALT: load workspace
+```{r eval = F}
+load(here("outputs","04a-gcc-v1-4-model.Rdata"))
+```
+
+## load data
+```{r}
+# observed coral cover
+cc_dat <- read_rds(here("data", "allreefs_coralcover.RDS")) %>% 
+  as_tibble() %>% 
+  select(OBJECTID, geometry, pct_hardcoral:method_cat)
+
+# environmental and social variables
+# remove - redundant with below
+# env_dat <- read_rds(here("data", "allreefs_gcc.RDS")) %>% 
+#   rename(OBJECTID = objectid)
+
+lrp_coords <- read_csv(here("data","allreefs_centroids.csv"), 
+                       col_types = c("c","d","d"))
+
+# GCC table
+gcc_df <- read_rds(file = here("data", "allreefs_gcc.RDS"))
+
+```
+
+## prep data
+Join tables; keep only cells with coral cover data
+- For (10) LRP cells with 'unknown' survey method, set to 'pitlitbleach'
+- these are all ETP; will fold in with region otherwise. Safe to assume since its from a long term DB
+```{r}
+lrp_gcc_df <- gcc_df %>% 
+  mutate(pct_hardcoral_transform = beta_transform(pct_hardcoral),
+         population_log = log1p(pop_count_raw),
+         effluent_openN_log = log1p(effluent_open_n),
+         effluent_totN_log = log1p(effluent_total_n),
+         dist_from_eq = abs(0-latitude)) %>% 
+  mutate(mgmt_highest = if_else(mgmt_highest == "unknown", "open access", mgmt_highest), 
+         mgmt_highest = factor(mgmt_highest, 
+                               levels = c("open access", "restricted", "no take"), 
+                               ordered = F)) %>% 
+  select(-c(sample_yr_min, sample_yr_max, grav_nc_raw))
+
+lrp_gcc_df %>% select(-geometry) %>% skim() # nrows = 54596
+
+lrp_gcc_df %>% tabyl(mgmt_highest)
+lrp_gcc_df %>% tabyl(method_cat)
+
+# 1671 model cells
+ccmod_df <- lrp_gcc_df %>% 
+  filter(!is.na(pct_hardcoral))
+
+ccmod_df %>% select(-geometry) %>% skim()
+ccmod_df %>% tabyl(region)
+ccmod_df %>% tabyl(country)      # not enough samples per country; use region
+ccmod_df %>% tabyl(mgmt_highest)
+
+ccmod_df %>% 
+  ggplot(aes(x = pct_hardcoral_transform))+
+  geom_histogram()+
+  facet_wrap(~method_cat)
+
+ggsave(here("plots","SM_plots",
+            "pct_hardcoral_by_method.png"), width = 7, height = 3)
+
+```
+
+# SAVE THESE TABLES
+```{r}
+# Save ----
+lrp_gcc_df %>% 
+  write_rds(here("outputs",
+             "04a_lrp_gcc_df.RDS"))
+
+lrp_gcc_sf <- lrp_gcc_df %>% 
+  st_as_sf(crs=4326)
+
+lrp_gcc_sf %>% 
+  write_rds(here("outputs",
+             "04a_lrp_gcc_sf.RDS"))
+
+ccmod_df %>% 
+  write_rds(here("outputs",
+             "04a_ccmod_df.RDS"))
+
+ccmod_sf <- ccmod_df %>% 
+  st_as_sf(crs=4326)
+  
+# geojson
+fn = here("outputs", "04a_ccmod_df.geojson")
+
+if(file.exists(fn)){
+  file.remove(fn)
+}
+
+st_write(ccmod_sf, dsn = fn, driver = "GeoJSON", append = F)
+
+
+```
+
+
+# Model Prep
+
+## Correlations - all numeric predictors
+- Using spearman (rank); if all are numeric could use pearson 
+```{r}
+
+png(here("plots", "SM_plots",
+         "gcc_v1_4_correlations.png"), height = 12, width = 12, units = "in", 
+    res = 300)
+
+ccmod_df %>% 
+  select(-c(objectid, geometry, country_iso, eez, starts_with("pct_hardcoral"))) %>% 
+  mutate_if(is.factor, as.numeric) %>% 
+  select_if(is.numeric) %>% 
+  cor(use = "pairwise.complete.obs", method = "spearman") %>% 
+  corrplot::corrplot(method = "color", addCoef.col = 'black', diag = F, 
+                     tl.cex = .5, tl.col = "black",
+                     number.cex = 0.5)
+
+dev.off()
+
+# SST correlations
+png(here("plots",
+         "gcc_v1_4_correlations_sst.png"), height = 7, width = 7, units = "in", 
+    res = 300)
+
+ccmod_df %>% 
+  select(starts_with("sst"), 
+         contains("dhw")) %>% 
+  cor(use = "pairwise.complete.obs", method = "pearson") %>% 
+  corrplot::corrplot(method = "color", addCoef.col = 'black', diag = F, 
+                     order = "hclust",
+                     tl.cex = .7, tl.col = "black",
+                     number.cex = 0.7, 
+                     cl.cex = 0.7)
+
+dev.off()
+```
+
+## ALT: load RF and XGB
+```{r eval = F}
+rf_final <- read_rds(here("outputs",
+                "gcc_v1_4_random_forest.RDS"))
+
+ccmod_xgb <- read_rds(here("outputs",
+                "gcc_v1_4_xgb.RDS"))
+```
+
+
+## Random forest
+Use random forest to get variable importance and maximal performance
+R Packages 'caret' and 'randomForest'
+Then switch to GAM (for generalization)
+
+```{r}
+# General Setup
+set.seed(1986) # All models are random, want this to be reproducible. Delete this to see effect of randomness.
+
+Sys.getenv('R_MAX_VSIZE')
+Sys.setenv('R_MAX_VSIZE'='10.0Gb') # set under limit of physical memory
+
+# all variables (n = 40)
+rf_allvars <- c("latitude", "longitude","dist_from_eq",
+         "pop_count_raw", "num_ports_raw", "reef_value_raw", 
+         "sediment_raw", "nutrient_raw", "score_cy", "score_cn",
+         "dhw0", "dhw4", "dhw_max_cumul",
+         "sst_range", "sst_var", "sst_max", #  supplied from CRW
+         # UNCOMMENT TO USE: these variables are only ~80% complete (~300 missing) 
+         # "npp_mean" ,"npp_sd","reef_area_15km", "wave_energy_mean",      
+         "effluent_totN_log", "effluent_openN_log", 
+         "calcite", "dissolved_oxygen",
+         "ph_mean", "par_max", "diffuse_atn_max", "currents_velocity_mean",
+         "sst_skewness", "sst_kurtosis", "sst_annualtrend", 
+         "sst_max", "sst_range", "sst_var",
+         "aca_top_geo_simple", "aca_pr_lagoon", "aca_pr_slope", "aca_pr_crest",
+         "aca_pr_bank","aca_pr_seagrass", "gebco_depth", "gs_vr_score", 
+         "mgmt_highest", "method_cat", "region") %>% unique()
+
+ccmod_rf_set <- ccmod_df %>% 
+  select(pct_hardcoral_transform, all_of(rf_allvars))
+
+# 1671 obs, 40 variables.
+ccmod_rf_set %>% skim()
+# ---- 
+
+# cross val test for mtry value (mtry = 7)
+library(caret)
+
+nvars <- length(rf_allvars)
+sqrt(nvars) # 6.1
+
+rf_trControl = trainControl(
+   method = "repeatedcv",
+   number = 10,
+   repeats = 3,
+   savePredictions = "final"       # save predictions for the optimal tuning parameter
+)
+
+# run rf with caret (~10min)
+ccmod_rf <- train(
+   pct_hardcoral_transform ~ .,
+   data = ccmod_rf_set,
+   method = "rf",
+   na.action = na.roughfix, # uses the median/mode to fill in missing data
+   ntree = 2000,
+   metric = "RMSE",
+   tuneGrid = expand.grid(mtry = 5:8), # searching around mtry = sqrt(n_vars) (5:8)
+   trControl = rf_trControl
+)
+beepr::beep() # beep when finished 
+
+ccmod_rf
+rf_final <- ccmod_rf$finalModel
+
+write_rds(rf_final,
+          here("outputs",
+                "gcc_v1_4_random_forest.RDS"))
+
+```
+
+```{r}
+print(rf_final) # var expl = 49.4 
+plot(rf_final)
+varImpPlot(rf_final)
+
+rf_varimp <- randomForest::importance(rf_final) %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "variable") %>% 
+  mutate(keep = if_else(IncNodePurity > 1, 1,0)) %>% 
+  arrange(-IncNodePurity)
+
+p1_rf <- rf_varimp %>% 
+  ggplot(aes(y = reorder(variable,IncNodePurity), x = IncNodePurity, fill = factor(keep)))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("grey60","black"), name = "Keep variable?", labels = c("no", "yes"))+
+  ylab("")+xlab("Variable importance with random forest")+
+  theme_minimal()
+
+p1_rf
+
+top_vars <- rf_varimp$variable[1:22]
+top_vars <- top_vars[!top_vars %in%
+                       c("method_catphoto","mgmt_highestunknown",
+                         "regionCaribbean-Atlantic","method_catpitlitbleach")]
+top_vars <- c(top_vars, c("method_cat", "mgmt_highest", "region"))
+
+top_vars
+```
+
+
+## Boosted regresssion trees
+ALTERNATIVE TO random forests
+Possibly deals better with correlations
+
+```{r}
+library(xgboost)
+library(caret)
+set.seed(1986)
+
+xgb_trControl = trainControl(
+   method = "repeatedcv",
+   number = 10,
+   repeats = 3,
+   savePredictions = "final"       # save predictions for the optimal tuning parameter
+)
+
+garbage <- capture.output(
+ccmod_xgb <- train(
+   pct_hardcoral_transform ~ .,
+   data = ccmod_rf_set,
+   na.action = na.roughfix, # uses the median/mode to fill in missing data
+   method = "xgbTree",
+   metric = "RMSE",
+   tuneLength = 5,
+   trControl = xgb_trControl
+))
+
+# beep when finished 
+beepr::beep() 
+
+# save 
+write_rds(ccmod_xgb,
+          here("outputs",
+                "gcc_v1_4_xgb.RDS"))
+
+```
+
+```{r}
+ccmod_xgb
+ccmod_xgb$finalModel
+
+varimp_xgb <- caret::varImp(ccmod_xgb)$importance %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "variable") %>% 
+  rename(Importance = Overall) %>% 
+  mutate(keep = if_else(Importance > 25, 1, 0))
+
+p2_xgb <- varimp_xgb %>% 
+  ggplot(aes(y = reorder(variable,Importance), x = Importance, fill = factor(keep)))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("grey60","black"), name = "Keep variable?", labels = c("no", "yes"))+
+  ylab("")+xlab("Variable importance with XGBoost")+
+  theme_minimal()
+
+p2_xgb
+
+```
+
+## Compare RF and XGB
+```{r}
+# Compare RF and XGB
+png(here("plots", "variable_importance.png"), 
+    height = 6, width = 9, units = "in", res = 300)
+
+ggpubr::ggarrange(p1_rf  + theme(text = element_text(size = 9)),
+                  p2_xgb + theme(text = element_text(size = 9)),
+                  nrow = 1, common.legend = T, legend = "bottom", 
+                  labels = "AUTO")
+
+dev.off()
+
+# ALL top vars (RF and XGB)
+
+top_vars_all <- c(rf_varimp$variable[rf_varimp$keep == 1], 
+                  varimp_xgb$variable[varimp_xgb$keep == 1]) %>% 
+  unique()
+  
+
+top_vars_all <- top_vars_all[!top_vars_all %in%
+                       c("method_catphoto","mgmt_highestunknown",
+                         "regionCaribbean-Atlantic","method_catpitlitbleach")]
+top_vars_all <- c(sort(top_vars_all), c("method_cat", "mgmt_highest", "region")) %>% 
+  unique()
+
+top_vars_all
+
+# correlations among top vars (n=20)
+# sst_kurtosis, sst_range
+# sst_kurtosis, dist_from_eq
+
+png(here("plots", "SM_plots",
+         "gcc_v1_4_correlations_top_vars.png"), height = 7, width = 7, units = "in", 
+    res = 300)
+
+ccmod_df %>% 
+  select(all_of(top_vars_all),-c(method_cat, mgmt_highest, region), latitude, longitude) %>% 
+  mutate(across(everything(), ~(as.numeric(.)))) %>% 
+  cor(use = "pairwise.complete.obs", method = "pearson") %>% 
+  corrplot::corrplot(method = "color", addCoef.col = 'black', diag = F, 
+                     order = "alphabet",
+                     tl.cex = .6, tl.col = "black",
+                     number.cex = 0.6)
+
+dev.off()
+
+
+```
+
+# GAM Model Testing
+
+## GAM Setup
+- Consider variable transformations as appropriate
+
+```{r}
+#install_version("MuMIn", version = "1.46.0", repos = "http://cran.us.r-project.org")
+library(MuMIn)
+library(parallel)
+
+# remove dist_from_eq; check population
+gam_vars <- c(top_vars_all[!top_vars_all %in%
+                         c("dist_from_eq","aca_pr_seagrass")]) %>% sort()
+
+gam_vars %>% as_tibble() %>% 
+  write_csv(here("intermediate-files","gam_vars.csv"))
+
+
+# 1671 -> 1658!
+gam_df <- ccmod_df %>% 
+  select(pct_hardcoral_transform, all_of(gam_vars)) %>% 
+  drop_na()
+
+gam_df %>% skim()
+
+```
+
+## GAM Pre-checks
+```{r}
+# check variable distributions
+for(v in c("pct_hardcoral_transform", gam_vars)){
+  if(! v %in% c("method_cat","mgmt_highest","region", "latitude","longitude")){
+    gam_df %>% pull(v) %>% hist(main = v)   
+  }
+}
+
+
+corrs <- gam_df %>% 
+  select(-c(pct_hardcoral_transform, method_cat, mgmt_highest, region)) %>% 
+  as.matrix() %>% 
+  cor(use = "pairwise.complete.obs", method = "pearson") %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "var1") %>% 
+  pivot_longer(calcite:sst_var, names_to = "var2", values_to = "cor")
+
+# sst_kurtosis, sst_range 
+corrs %>% 
+  filter(var1 != var2, 
+         abs(cor) >= .7)
+
+```
+
+
+## Generate candidate models
+NOTE: this takes awhile (days!) to run. Eval is set to false by default.
+```{r eval = F}
+source(here("01a-gcc-v1-4-candidate-models.R")
+```
+
+## Read and compare candidate models
+```{r}
+# this file includes models with 4-7 variables. 4 variables = base model (lat, lon, method, mgmt, region)
+# dredge 1-4: 
+gam_dredge4 <- read_csv(here(
+                              "intermediate-files","gam_dredge_4.csv"))
+gam_dredge5 <- read_csv(here(
+                              "intermediate-files","gam_dredge_5.csv"))
+gam_dredge6 <- read_csv(here(
+                              "intermediate-files","gam_dredge_6.csv"))
+gam_dredge7 <- read_csv(here(
+                              "intermediate-files","gam_dredge_7.csv"))
+gam_dredge8 <- read_csv(here(
+                              "intermediate-files","gam_dredge_8.csv"))
+gam_dredge9 <- read_csv(here(
+                              "intermediate-files","gam_dredge_9.csv"))
+
+gam_dredge_combn <- rbind(gam_dredge4, gam_dredge5, gam_dredge6, gam_dredge7,
+                          gam_dredge8, gam_dredge9)
+
+lowest_aic <- min(gam_dredge_combn$AICc)
+
+# 6415 candidate models
+gam_dredge_df <- gam_dredge_combn %>% 
+  clean_names() %>% 
+  rename("aic_c" ="ai_cc") %>% 
+  mutate(delta = aic_c - lowest_aic) %>%  
+  mutate(across(matches("s_"), ~ ifelse(.=="+", 1, .))) %>%
+  mutate(across(matches("mgmt_"), ~ ifelse(.=="+", 1, .))) %>% 
+  mutate(across(starts_with("te_"), ~ ifelse(.=="+", 1, .))) %>% 
+  mutate(n_terms = rowSums(across(starts_with("s_")), na.rm=T) + 2) %>% 
+  distinct(pick(starts_with("s_")), .keep_all = T) %>% 
+  rename_all(~str_replace(.,"s_","")) %>%
+  rename_all(~str_replace_all(.,"_k_6_bs_cr|_bs_re|_bs_fs_k_6|_bgp_k_c_10_10_m_2","")) %>%  
+  select(-weight) %>% 
+  arrange(aic_c)
+
+```
+
+## Summarise
+```{r}
+# candidate model summary
+gam_dredge_df %>% 
+  select(n_terms, log_lik, dev_exp, aic_c) %>% 
+  pivot_longer(-n_terms, names_to = "metric") %>% 
+  ggplot(aes(x = factor(n_terms), y = value))+
+  geom_boxplot()+
+  facet_wrap(~metric, ncol = 3, scales = "free_y")
+
+ggsave(here("plots","SM_Plots", 
+          "candidate_model_summary.png"), height = 4, width = 9)
+
+# candidate models with delta AICc < 4
+gam_dredge_top <- gam_dredge_df %>% 
+  arrange(aic_c) %>% 
+  mutate(model = seq(1,nrow(gam_dredge_df))) %>% 
+  relocate(model) %>% 
+  filter(delta < 4)
+
+gam_dredge_top
+
+
+gam_dredge_top %>% write_csv(here("outputs","gam_dredge_top_models.csv"))
+
+# variable names for the top model(s)
+final_vars <- gam_dredge_top %>% 
+  filter(model == 1) %>% 
+  select_if(~ !all(is.na(.))) %>% 
+  select(any_of(gam_vars)) %>% 
+  names()
+
+final_vars
+
+# print for use in table 2
+cat(c("te(lat,lon)",
+    final_vars[!final_vars %in% c("mgmt_highest","method_cat","region")], 
+    "mgmt_highest"),sep = " + ")
+
+# table 2 (other cols)
+gam_dredge_top %>% 
+  select(model, n_terms, df, dev_exp, log_lik, aic_c, delta) %>% 
+  kbl() %>% 
+  kable_classic()
+
+```
+
+
+# Final GAM Models
+```{r}
+library(MuMIn)
+
+# Final vars after model comparison:
+# calcite + dhw_max_cumul + par_max + ph_mean + score_cn + sst_range + sst_skewness + mgmt_highest
+
+final_vars %>% as_tibble() %>% 
+  rename(variable = value) %>% 
+    write_csv(here("outputs","gam_vars_final.csv"))
+  
+# 1671 --> 1663
+gam1_df <- ccmod_df %>% 
+  select(objectid, geometry, country,
+         pct_hardcoral_transform,
+         all_of(final_vars), latitude, longitude) %>% 
+  drop_na()
+
+gam1_df %>% select(-geometry) %>% skim()
+
+# Check correlations (watch: par_max, sst_kurtosis; dissolved_oxygen, sst_max)
+png(here("plots","SM_Plots", 
+          "gam1_correlations.png"), height = 7, width = 7, units = "in", res = 300)
+gam1_df %>% 
+  select(all_of(final_vars)) %>% 
+  mutate(across(everything(), ~as.numeric(.))) %>% 
+  cor(use = "pairwise.complete.obs", method = "pearson") %>% 
+  corrplot::corrplot(method = "color", addCoef.col = 'black', diag = F, 
+                     tl.cex = 1, tl.col = "black",
+                     number.cex = 1)
+dev.off()
+
+# VIF among top predictors
+# Max VIF (adjusted) = 3.28 (longitude); all others < 2
+DescTools::VIF(lm(pct_hardcoral_transform ~ ., 
+                  data = gam1_df %>% select(pct_hardcoral_transform, 
+                                            latitude, longitude,
+                                            all_of(final_vars))))
+```
+
+## GAM 1 Generate model
+
+Family: betar (proportions data on (0,1) when the binomial is not appropriate)
+Link: The link function: one of "logit", "probit", "cloglog" and "cauchit".
+theta: the extra parameter (phi above).
+method: "REML", alts: "ML", "GCV" (REML is preferred b/c of stability)
+
+
+```{r gam1}
+
+final_vars
+kmax = 6
+
+# max performance for lat,lon with k = 14,14 (but time to generate each model increases A LOT)
+# NOTE: computational limitations meant we couldn't test all gam models with k = 14,14; most
+# were tested with k = 10,10
+gam1 <- gam(pct_hardcoral_transform ~ 
+              te(longitude,latitude, bs = "gp", k = c(14,14), m = 2) + 
+              s(dhw_max_cumul, k=kmax, bs = "cr")+               # CHECK
+              s(par_max, k=kmax, bs = "cr")+                    # m1
+              s(ph_mean, k=kmax, bs = "cr") +                   # m1
+              s(score_cn, k=kmax, bs = "cr") +                  # m1
+              s(sst_skewness, k=kmax, bs = "cr")+               # m1
+              mgmt_highest +                                    # all models
+              s(method_cat, bs = 're') +                        # all models
+              s(region, bs = 're'),                             # all models
+            data = gam1_df, 
+            gamr = 1.4, # higher penalty for complexity (default is 1)
+            family = "betar", 
+            link = "logit",# 
+            method = "REML",
+            na.action = "na.fail") 
+
+# beep when the model is done
+beepr::beep()
+
+gam1_info <- tibble(
+  model = "gam1",
+  r_sq = summary(gam1)$r.sq, 
+  edf = sum(influence(gam1)),
+  dev_expl = summary(gam1)$dev.expl*100,
+  logLik = logLik.gam(gam1)[1], 
+  AICc = AICc(gam1))
+
+
+gam1_info # max dev expl. (observed range = 53.5 - 55.77; current: 54.43)
+
+```
+```{r}
+# Save as 'final'
+gam_final <- gam1
+gam_final_df <- gam1_df %>% 
+  mutate(pct_hardcoral_predicted = gam_final$fitted.values)
+
+## Save final model! 
+write_rds(gam_final, here("outputs","gcc_v1_4_gam.RDS"))
+write_rds(gam_final_df, here("outputs","gcc_v1_4_gam_df.RDS"))
+
+```
+
+
+## ALT: Load final model
+```{r eval = False}
+
+# load final gam model and info
+gam_final <- read_rds(here("outputs","gcc_v1_4_gam.RDS"))
+
+gam_final_df <- read_rds(here("outputs","gcc_v1_4_gam_df.RDS"))
+
+```
+
+## GAM 1 Performance
+
+```{r}
+
+# Observed vs. predicted - histogram
+
+op_hist <- gam_final_df %>% 
+  ggplot(aes(x =pct_hardcoral_transform))+
+  geom_histogram(alpha = 0.6, fill = "gray10")+
+  geom_histogram(aes(x = pct_hardcoral_predicted), 
+                 alpha = 0.6, fill = "blue")+
+  xlab("percent live hard coral")
+
+op_hist
+
+# Observed vs. predicted - 1:1 plot
+
+op_line <- gam_final_df %>%
+  ggplot(aes(y = pct_hardcoral_transform, x = pct_hardcoral_predicted))+
+  geom_point(aes(colour = region), alpha = 0.8, size = 1, pch = 16)+
+  scale_colour_manual(values = region_palette)+
+  geom_smooth(method = lm, se = F, colour = "grey30", lwd = 0.5)+
+  xlim(0,0.8)+ylim(0,0.8)+
+  theme_light()+
+  xlab("percent live hard coral: predicted")+
+  ylab("percent live hard coral: observed")
+
+op_line
+
+png(here("plots","SM_Plots", 
+          "gam1_obs_vs_pred.png"), height = 4, width = 9, units = "in", res = 300)
+
+ggpubr::ggarrange(op_hist  + theme(text = element_text(size = 8)),
+                  op_line + theme(text = element_text(size = 8)),
+                  nrow = 1, common.legend = F,
+                  labels = "AUTO", widths = c(1,1.5))
+
+dev.off()
+
+
+```
+
+## GAM 1 Performace Cont'd
+```{r}
+# Model performance ----
+summary(gam_final) # 54.4
+# gam.check() plots: 
+# q-q plot: should follow a 1:1 line
+# histogram of residuals: should be approximately normal
+# residuals vs. linear predictor: should be 
+# observed vs. fitted values: 
+
+
+# rep = 500, simulating data from response; creating confidence intervals on q-q plot
+# Check k-index, should be > 1. k-index < 1 indicates additional variability 
+# in the parameter that is not captured by the model.
+
+gam.check(gam_final, rep = 500) 
+
+# Correlation between raw and predicted values (r = 0.648)
+cor(gam_final$y, gam_final$fitted.values, method = "pearson") # 0.674
+
+# Takes a fitted gam object produced by gam() and plots the component smooth functions that make it up, on the scale of the linear predictor. Optionally produces term plots for parametric model components as well
+
+plot(gam_final)
+vis.gam(gam_final, theta = 10)
+b <- getViz(gam_final)
+print(plot(b, allTerms = T)) # Calls print.plotGam() pages = 1
+
+png(here("plots", "SM_plots", "gam1_component_plot.png"), width = 12, height = 7, units = "in", res = 300)
+
+print(plot(b, allTerms = T), pages =1) 
+
+dev.off()
+```
+
+
+## GAM 0: Intercept Model
+```{r gam0}
+gam0 <- gam(pct_hardcoral_transform ~ 
+              s(method_cat, bs = 're') +             # all models         
+              s(region, bs = 're'),                  # all models         
+            data = gam1_df, 
+            family = "betar", 
+            link = "logit",
+            method = "REML", 
+            na.action = "na.fail") 
+
+gam0_info <- tibble(
+  model = "gam0",
+  r_sq = summary(gam0)$r.sq, 
+  edf = sum(influence(gam0)),
+  dev_expl = summary(gam0)$dev.expl*100,
+  logLik = logLik.gam(gam0)[1], 
+  AICc = AICc(gam0))
+
+gam0_info
+```
+
+ 
+## Other figures
+```{r}
+# Partial plots ----
+# THESE ARE NOT THE SAME AS THE MODEL -- geom_smooth provides a new (and different) fit. 
+# TO USE this, need to EXTRACT from the actual model and re-plot using ggplot
+# NOT NECESSARY ATM -- all this is included in SM
+
+# visreg::visreg(gam_final,  gg=T, overlay = T, rug = T)
+
+```
+
+
+```{r}
+# SEE COMMENT ABOVE
+# ggplot(smooths, aes(x.val, value)) + 
+#   geom_line() + 
+#   geom_line(aes(y=value + 2*se), linetype="dashed") + 
+#   geom_line(aes(y=value - 2*se), linetype="dashed") + 
+#   facet_grid(. ~ x.var)
+# 
+# 
+# draw(gam_final, residuals = TRUE)
+# 
+# # dhw_max_cumul + diffuse_atn_max + par_max + ph_mean + score_cn + sst_skewness + mgmt_highest
+# gam_final_df %>% 
+#   ggplot(aes(x = dhw_max_cumul, y = pct_hardcoral_predicted))+
+#   geom_smooth()+
+#   geom_rug(sides = "b")+
+#   theme_light()
+# 
+# gam_final_df %>% 
+#   ggplot(aes(x = diffuse_atn_max, y = pct_hardcoral_predicted))+
+#   geom_smooth()+
+#   geom_rug(sides = "b")+
+#   theme_light()
+# 
+# gam_final_df %>% 
+#   ggplot(aes(x = par_max, y = pct_hardcoral_predicted))+
+#   geom_smooth()+
+#   geom_rug(sides = "b")+
+#   theme_light()
+# 
+# gam_final_df %>% 
+#   ggplot(aes(x = ph_mean, y = pct_hardcoral_predicted))+
+#   geom_smooth()+
+#   geom_rug(sides = "b")+
+#   theme_light()
+# 
+# gam_final_df %>% 
+#   ggplot(aes(x = score_cn, y = pct_hardcoral_predicted))+
+#   geom_smooth()+
+#   geom_rug(sides = "b")+
+#   theme_light()
+# 
+# gam_final_df %>% 
+#   ggplot(aes(x = sst_skewness, y = pct_hardcoral_predicted))+
+#   geom_smooth()+
+#   geom_rug(sides = "b")+
+#   theme_light()
+# 
+# gam_final_df %>% 
+#   ggplot(aes(x = region, y = pct_hardcoral_predicted))+
+#   geom_boxplot()+
+#   theme_light()
+# 
+# gam_final_df %>% 
+#   ggplot(aes(x = method_cat, y = pct_hardcoral_predicted))+
+#   geom_boxplot()+
+#   theme_light()
+# 
+# # NOTE: most "unknown" cells have lower predicted (and observed) coral cover. 
+# # :. if we test the counterfactual against mgmt_unknown cells, coral cover will always be higher
+# # :. can only show difference where mgmt is currently KNOWN.
+# # 
+# # Open access ... "open access identified" vs. unknown = "open access presumed"
+# # Unk is not likely to be no-take or restricted ... 
+# # When management is happening, we know about it (restricted, no-take)
+# # We're going to believe that "open access" is truly open access
+# # AND when we don't know what it is, it's reasonable to presume that it's open access.
+# 
+# gam_final_df %>% 
+#   ggplot(aes(x = mgmt_highest, y = pct_hardcoral_predicted))+
+#   geom_boxplot()+
+#   theme_light()
+# 
+```
+
+
+# SAVE WORKSPACE ----
+```{r eval=FALSE, include=FALSE}
+# uncomment to save
+# save.image(here("outputs","04a-gcc-v1-4-model.Rdata")) 
+
+```
+
