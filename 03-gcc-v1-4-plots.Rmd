@@ -1,0 +1,782 @@
+---
+title: "03-gcc-v1-4-plots.Rmd"
+author: "Whitney Friedman"
+date: '2024-05-01'
+output: html_document
+---
+
+# Plots for gcc v1.4 
+
+```{r setup}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+## Load libraries
+```{r}
+library(here)
+source(here("00-load-cc-libraries.R"))
+library(mgcv)
+library(sf)
+library(RColorBrewer)
+library(ggpubr) #plots
+library(skimr)
+library(kableExtra)
+
+# Mapping
+library(leaflet)
+library(leaflet.esri)
+library(htmlwidgets)
+# leaflet provider tile options: 
+# https://leaflet-extras.github.io/leaflet-providers/preview/index.html
+
+# GAM plots
+library(mgcViz)
+
+```
+
+
+## Load model
+```{r}
+gcc_mdl <- read_rds(here("outputs","gcc_v1_4_gam.RDS"))
+
+gcc_mdl_df <- read_rds(here("outputs","gcc_v1_4_gam_df.RDS")) %>% 
+  mutate(cc_pred = pct_hardcoral_predicted,
+         cc_obs = pct_hardcoral_transform, 
+         cc_delta = abs(cc_pred - cc_obs))
+
+gcc_vars <- read_csv(here("intermediate-files","gam_vars_final.csv")) %>% 
+  pull(variable)
+
+gcc_vars
+
+```
+
+## Load full allreefs + gcc dataset (55,000 cells) + surveys
+```{r}
+allreefs_gcc <- read_rds(here("data",
+                              "allreefs_gcc.RDS"))
+allreefs_gcc
+
+allreefs_gcc_sf <- read_rds(here("data",
+                              "allreefs_gcc_sf.RDS"))
+allreefs_gcc_sf
+
+# surveys
+cc_surveys_sf <- read_rds(here("data",
+                              "cc_surveys_combn.RDS")) %>% 
+  st_as_sf(coords = c("longitude","latitude"), crs = 4326)
+
+cc_surveys_sf
+```
+
+
+
+## Load predictions
+```{r}
+# Baseline prediction
+allreefs_pred <- read_rds(here("outputs","allreefs_pred_cc.RDS"))
+allreefs_pred %>% select(-geometry) %>% skim()
+
+# Counterfactual predictions - 5km cells
+allreefs_counterfac <- read_rds(here("outputs","allreefs_counterfac.RDS"))
+
+allreefs_counterfac %>% select(-geometry) %>% skim()
+
+predict_df <- allreefs_pred %>% 
+  left_join(allreefs_counterfac %>% select(objectid, 
+                                           pct_hardcoral_counterfac,
+                                           pct_hardcoral_counterfac_se))
+
+predict_df %>% select(-geometry) %>% skim()
+predict_df %>% names()
+
+# make it a spatial object
+predict_sf <- predict_df %>% 
+  st_as_sf(crs = 4326)
+
+# Counterfactual predictions - sites
+counterfac_sites_df <- read_rds(here("outputs","counterfac_sites_df.RDS"))
+
+# Country_ISO table
+country_df <- allreefs_gcc %>% 
+  select(country, country_iso) %>% distinct() %>% 
+  drop_na()
+
+# Site_ID table
+site_id <- counterfac_sites_df %>% 
+  select(country, site) %>% 
+  group_by(country) %>% 
+  reframe(site = site, 
+          n = seq(1,n())) %>% 
+  left_join(country_df) %>% 
+  unite(site_id, c(country_iso,n), sep = "_")
+            
+site_id
+
+counterfac_sites_df <- counterfac_sites_df %>% 
+  left_join(site_id, by = c("country","site")) %>% 
+  relocate(site_id) %>% 
+  mutate(mgmt_highest_orig = factor(mgmt_highest_orig,
+         levels = c("no take", "restricted", "open access")))
+
+counterfac_sites_df
+
+counterfac_sites_df %>% tabyl(mgmt_highest_orig)
+
+```
+
+## Load mapping files 
+load mapping files common across regions
+
+```{r}
+world <- read_sf(here("globalprep","analysis","mapping","map_data","worldbank_hi_res",
+             "WB_countries_Admin0_10m.shp"))
+
+
+# plot(world,max.plot=1)
+# st_crs(world)  # 4326; OK
+
+# colors for plotting coral cover 
+map_cols <- c('#92032a','#fee08b','#ffffbf',
+                      "#7fcdbb","#41b6c4","#1d91c0", "#225ea8","#0c2c84",
+                      '#2c054b')
+
+# Load pac centred map (created with "pac-centred-maps.R")
+world3 <- read_rds(here("map-data","world_pac_centred.rds"))
+
+```
+
+# PLOTS of obs vs. predicted by country
+3 countries; by grid-cell
+NOT CURRENTLY IN USE; using regional plots instead (Figure s7)
+```{r}
+#countries <- gcc_mdl_df$country %>% unique() # all countries (n = 143); would need to do this loop to create #outputs for every ~10 countries
+
+countries <- c("Belize","Fiji","Tanzania") # focal countries
+
+plt_list = list()
+for(i in 1:length(countries)){
+  c = countries[i]
+  
+  # Predictions are already there; just look at Fiji more closely
+  country_df <- allreefs_pred %>% 
+    filter(country == c,
+           !is.na(pct_hardcoral_obs)) %>% 
+    mutate(cc_pred = pct_hardcoral_predicted*100, 
+           cc_pred_se = pct_hardcoral_predicted_se*100,
+           cc_pred_max = cc_pred + cc_pred_se, 
+           cc_pred_min = cc_pred - cc_pred_se, 
+           #cc_delta = cc_delta*100, 
+           cc_obs = pct_hardcoral_obs*100)
+  
+  
+  # NOTE 6/17: FIX THIS PLOT so that the line goes from predicted +/- SE 
+  # (not including “observed”) value. (Want to include error in lollipop plots).
+
+  country_plt <- country_df %>% 
+    select(objectid, cc_obs, cc_pred, cc_pred_max, cc_pred_min) %>%
+    pivot_longer(-c(objectid, cc_pred_max, cc_pred_min), names_to = "var") %>% 
+    mutate(var = factor(var)) %>% 
+    ggplot(aes(x = reorder(objectid, value), y = value, 
+               colour = var, shape = var))+
+    geom_segment(aes(y = cc_pred_min, yend = cc_pred_max), 
+                 color = "purple", lwd = 0.4, alpha = 0.7)+
+    geom_point(size = .9)+
+    scale_colour_manual(values = c("grey20","purple"), name = "", 
+                        labels = c("Observed", "Predicted"))+
+    scale_shape_manual(values = c(19, 21), name = "", 
+                        labels = c("Observed", "Predicted"))+
+    ylim(0,80)+
+    ylab("% live hardcoral")+
+    ggtitle(c)+
+    theme_bw()+
+    theme(axis.text.x = element_blank(), 
+          axis.title.x = element_blank(),
+          panel.grid = element_line(linewidth=.1, color="gray80"))
+  
+  plot(country_plt)
+
+  plt_list[[i]] <- country_plt
+}
+
+
+png(here("plots","SM_plots",
+         "gcc_v1_4_obs_pred_3countries.png"), 
+    res = 300, width = 7, height = 6, units = "in")
+
+ggarrange(plotlist = plt_list[1:length(countries)],
+          nrow = length(countries), legend = "bottom", common.legend = T, 
+          labels = "AUTO")
+
+dev.off()
+
+
+
+```
+
+# MAPS of obs vs. predicted values by country
+
+## Maps of observed & predicted values for 3 focal countries (bz, in, tz)
+NEW: 
+A - Observed values / cells (looks the same)
+B - Filled in grids (prediction at current conditions)
+C - counterfactual prediction (prediction of “no management” - for cells where mgmt is known)
+D - Lollipop plot - 17 SITES (is the observation - no-mgmt prediction) - dropping a “pin” through each site; compare to 5km counterfactual estimate.  COLOR BY: observed management type
+
+MESSAGE: Can use models to look at whether real places / surveys are above/below predictions. 
+
+Focusing on management in 3 countries.
+
+```{r}
+
+countries <- c("Belize","Fiji","Tanzania") # focal countries
+
+bz_bbox <- c(89,86.9,16,18) # belize xmin,xmax,ymin,ymax    xlim(89,87)+ylim(16,18)+
+#in_bbox <- c(-94.5,-142,-11,6) # indonesia - full
+#in_bbox <- c(-120.9,-125.1,-8.5,-4.1) # indonesia - zoom
+fj_bbox <- c(-176.6, -180, -19.3, -16)
+tz_bbox <- c(-38,-41.7,-8.7,-4.9) # tanzania 38,-3.5; 43,-11
+
+# 3 maps with counterfac (no management) prediction
+map_list = list()
+for(i in 1:length(countries)){
+  c = countries[i]
+  num_cols = 3
+  if(c == "Belize"){bbox = bz_bbox}
+  if(c == "Fiji"){bbox = fj_bbox} # num_cols = 1
+  if(c == "Tanzania"){bbox = tz_bbox}
+  
+  country_df <- predict_df %>% 
+    filter(country == c) %>% 
+    mutate(cc_pred = pct_hardcoral_predicted*100, 
+           cc_obs = pct_hardcoral_obs*100, 
+           cc_counterfac = pct_hardcoral_counterfac*100)
+
+  # convert country data to sf
+  country_sf <- country_df %>% 
+    pivot_longer(cols = c(cc_obs, cc_pred, cc_counterfac), names_to = "var",
+                 values_to = "pct_hardcoral") %>% 
+    mutate(var = factor(var, levels = c("cc_obs","cc_pred","cc_counterfac")), 
+           var = recode_factor(var, 
+                               "cc_obs" = "Observed",
+                               "cc_pred" = "Predicted (observed conditions)", 
+                               "cc_counterfac" = "Predicted (no mgmt)")) %>% 
+    filter(var != "Predicted (no mgmt)") %>% 
+    st_as_sf(crs = 4326)
+
+  # observed, predicted-base, predicted-nomgmt
+  country_map <- ggplot(country_sf) +
+    geom_sf(aes(fill = pct_hardcoral), lwd = 0.1, color = "gray70")+
+    scale_fill_gradientn(colours = map_cols, limits = c(0,100), na.value = "gray90",
+                         name = "% Live hard coral")+
+    geom_sf(data = world, fill = "gray30")+
+    xlim(bbox[1],bbox[2])+
+    ylim(bbox[3],bbox[4])+
+    facet_wrap(~var, ncol = num_cols)+
+    ggtitle(c)+
+    theme_rotate()+
+    theme(legend.position = "right", 
+          axis.text.x = element_blank(), 
+          axis.text.y = element_blank(),
+          strip.background = element_rect(fill = "white", color = "white"),
+          strip.text = element_text(color = "black", size = 8, hjust = 0))
+  
+  map_list[[i]] <- country_map
+  print(country_map)
+  
+}
+
+```
+
+## Site-level predictions vs. observed
+
+```{r}
+rm(country_df)
+#checks
+counterfac_sites_df %>% tabyl(mgmt_highest_orig) %>% adorn_totals()
+counterfac_sites_df %>% tabyl(mgmt_highest) %>% adorn_totals()
+
+# focal countries
+countries <- c("Belize","Fiji","Tanzania")
+
+site_plots = list()
+for(i in 1:length(countries)){
+  c = countries[i]
+
+  if(c != "Fiji"){
+  country_df <- counterfac_sites_df %>%
+    filter(country == c,
+           !is.na(pct_hardcoral_counterfac)) %>%
+    slice_sample(n = 20, by = "mgmt_highest_orig")}
+
+  # there are: 0 open access sites in Fiji; 30 no-take, 680 'restricted'
+  if(c == "Fiji"){
+  country_df <- counterfac_sites_df %>% 
+    filter(country == c,
+           !is.na(pct_hardcoral_counterfac)) %>%
+    slice_sample(n = 30, by = "mgmt_highest_orig")}
+  
+  #cat(c, "\n")
+  #country_df %>% tabyl(mgmt_highest_orig) %>% adorn_totals() %>% print()}
+  
+  country_df_pred <- country_df %>% 
+        mutate(cc_obs = pct_hardcoral * 100, 
+           cc_pred = pct_hardcoral_counterfac * 100, 
+           cc_pred_se = pct_hardcoral_counterfac_se *100,
+           cc_pred_max = cc_pred + cc_pred_se, 
+           cc_pred_min = cc_pred - cc_pred_se)
+  
+  site_plt <- country_df_pred %>%
+    ggplot(aes(y = reorder(site, cc_obs), x = cc_obs, shape = mgmt_highest_orig))+
+    # segment from obs to predicted:
+    geom_segment(aes(y = reorder(site, cc_obs), xend = cc_pred), 
+                 colour = "gray60", lwd = 0.4)+
+    # segment from pred_min to pred_max
+    geom_segment(aes(y = reorder(site, cc_obs), x = cc_pred_min, 
+                     xend = cc_pred_max), 
+                 lwd = 0.5, colour = "black")+
+    # add predicted points
+    geom_point(aes(y = reorder(site, cc_obs), x = cc_pred), size = 2, color = "black", fill = "black", stroke = 0)+
+    # add observed points, colored by % coral 
+    geom_point(aes(fill = cc_obs), size = 2, color = "gray50", stroke = 0.2)+
+    scale_fill_gradientn(colours = map_cols, limits = c(0,100), na.value = "gray90",
+                         name = "% Live hard coral observed")+
+    scale_shape_manual(values = c(21, 24, 22))+
+    guides(shape = "none")+
+    facet_wrap(~mgmt_highest_orig, nrow = 3, scales = "free_y",
+               strip.position = "right")+
+    xlab("% Live hard coral")+
+    xlim(0,85)+
+    scale_y_discrete(position = "right")+
+    ggtitle(label = "", subtitle = "Impact Assessment")+
+    theme_light()+
+    theme(panel.grid.major = element_line(linewidth =.1, color="gray90"), 
+          axis.text.y = element_text(size = 5), 
+          axis.title.y = element_blank(),
+          #strip.background = element_rect(fill = "white", color = "white"), 
+          legend.position = "bottom")
+  plot(site_plt)
+  
+  site_plots[[i]] <- site_plt
+}
+
+
+```
+
+# Figure 3: Country plots
+Combine country plots and save figure
+SUPER interesting to see how many sites are BELOW prediction in open access vs. other 2 categories
+```{r}
+#unit(c(top, right, bottom, left), units).
+
+plt_combined <- ggarrange(
+ # Belize
+  ggarrange(
+    map_list[[1]]+
+      theme(plot.margin = unit(c(.5,0,1,-6), 'lines'),
+                                legend.position = "none"),
+    site_plots[[1]]+
+      scale_y_discrete(position = "right")+
+      xlab("")+
+      theme(plot.margin = unit(c(-.5,4,-.5,-8), 'lines'), 
+            legend.position = "none"), 
+    nrow = 1, widths = c(3.5,1), labels = c("A","")),
+  # Fiji
+  ggarrange(
+    map_list[[2]]+
+      theme(plot.margin = unit(c(.5,0,1,-6), 'lines'),
+                        legend.position = "none"),
+    site_plots[[2]]+
+      xlab("")+
+      scale_y_discrete(position = "right")+
+      theme(plot.margin = unit(c(-.5, 2,-.5,-8), 'lines'),
+            legend.position = "none"), 
+  nrow = 1, widths = c(3.5,1), labels = c("B","")),
+  # Tanzania
+  ggarrange(
+    map_list[[3]]+
+      theme(plot.margin = unit(c(.5,0,1,-6), 'lines'),
+            legend.position = "bottom"),
+    site_plots[[3]]+
+      xlab("")+
+      scale_y_discrete(position = "right")+
+      theme(plot.margin = unit(c(-.5,2.5,3,-8), 'lines'),
+            legend.position = "none"),
+    nrow = 1, widths = c(3.5,1), labels = c("C","")),
+  # all plots
+  nrow = 3, heights = c(1,1,1.2), common.legend = T, legend = "bottom")
+
+ggsave(here("plots",
+          "gcc_v1_4_obs_pred_3countries_counterfac.png"), plot = plt_combined, 
+     width = 11, height = 12, bg = "white")
+```
+
+
+
+# Figure 1 v1: Surveys and coral grids 
+Figure 1 in MS
+PACIFIC CENTERED!
+Matches Figure 4
+
+```{r}
+
+# Takes ~10min to generate buffers
+# doesn't help.
+#coral_cells_buffered <- allreefs_gcc_sf %>% 
+#  select(objectid:longitude) %>% 
+#  st_buffer(., dist = 2) # dist is the buffer distance
+
+# Global map of coral grids and survey points
+survey_map <- ggplot(world3)+
+  # world
+  # geom_sf(fill = "gray95", color = "gray95", lwd = 0.01)+ # light
+  geom_sf(fill = "gray20", color = "gray20", lwd = 0.01)+ # dark
+  # coral grids
+  geom_sf(data = predict_sf, aes(fill = region, color = region), 
+          lwd = 0)+ #, color = "transparent")+
+  # surveys
+    geom_sf(data = cc_surveys_sf, size = 1.5, alpha = .8, shape = 4, stroke = 0.1,
+            color = "gray90")+ # light: grey10, dark: grey70; shape = 1 or 4
+    xlim(-140,165)+
+    ylim(-50,50)+
+    coord_sf(expand = F)+
+    theme_bw()+
+    theme(legend.position = "none", 
+          panel.background = element_rect(fill = "gray50"), # light: gray85
+          axis.text = element_text(size = 8, color = "black"),
+          panel.grid = element_blank())
+
+#survey_map
+
+ggsave(here("plots",
+          "survey_map.png"),plot = survey_map, height = 4, width = 9, dpi = 600)
+  
+
+```
+
+# Figure 1 v2: Surveys and coral grids 
+Figure 1 in MS
+PACIFIC CENTERED!
+Light version
+
+```{r}
+
+# Takes ~10min to generate buffers
+# doesn't help.
+#coral_cells_buffered <- allreefs_gcc_sf %>% 
+#  select(objectid:longitude) %>% 
+#  st_buffer(., dist = 2) # dist is the buffer distance
+
+# Global map of coral grids and survey points
+survey_map <- ggplot(world3)+
+  # world
+  geom_sf(fill = "gray60", color = "gray60", lwd = 0.01)+ # light
+  # coral grids
+  geom_sf(data = predict_sf, aes(fill = region, color = region), 
+          lwd = 0)+ #, color = "transparent")+
+  # surveys
+    geom_sf(data = cc_surveys_sf, size = 1, alpha = 0.6, shape = 16, stroke = 0.1,
+            color = "gray20")+ # light: grey10, dark: grey70; shape = 1 or 4
+    xlim(-140,165)+
+    ylim(-45,45)+
+    coord_sf(expand = F)+
+    theme_bw()+
+    theme(legend.position = "none", 
+          panel.background = element_rect(fill = "gray90"), # light: gray85
+          axis.text = element_text(size = 8, color = "black"),
+          panel.grid = element_blank())
+
+#survey_map
+
+ggsave(here("plots",
+          "survey_map_v2.png"), plot = survey_map, height = 3, width = 8, dpi = 600)
+  
+
+```
+
+# Figure 4 v1: Map of observed and predicted coral cover (baseline)
+Matches Fig 1 V1
+
+```{r}
+na_fill = "gray65" 
+#na_fill = "black"
+
+# Global map of OBSERVED coral cover (filled)
+global_observed <- ggplot(world3)+
+ #world
+  geom_sf(fill = "gray20", color = "gray20", lwd = 0.01)+
+# predicted 
+  geom_sf(data = predict_sf, aes(fill = pct_hardcoral_obs*100), 
+            lwd = 0.01, color = "transparent")+
+    scale_fill_gradientn(colours = map_cols, limits = c(0,100), na.value = na_fill,
+                         name = "% Live hardcoral")+
+    xlim(-140,165)+
+    ylim(-40,40)+
+    coord_sf(expand = F)+
+    theme_bw()+
+    theme(legend.position = "none", 
+          panel.background = element_rect(fill = "gray50"),
+          axis.ticks = element_blank(),
+          axis.text = element_blank(),
+          panel.grid = element_blank())
+
+#global_observed
+
+global_predicted <- ggplot(world3)+
+  geom_sf(fill = "gray20", color = "gray20", lwd = 0.01)+
+  geom_sf(data = predict_sf, aes(fill = pct_hardcoral_predicted*100), 
+            lwd = 0.01, color = "transparent")+
+    scale_fill_gradientn(colours = map_cols, limits = c(0,100), na.value = na_fill,
+                         name = "% Live hardcoral")+
+    xlim(-140,165)+
+    ylim(-40,40)+
+    coord_sf(expand = F)+
+    theme_bw()+
+    theme(legend.position = "none", 
+          panel.background = element_rect(fill = "grey50"),
+          axis.ticks = element_blank(),
+          axis.text = element_blank(),
+          panel.grid = element_blank())
+
+
+global_obs_pred <- ggarrange(global_observed, global_predicted, 
+                             nrow = 2, labels = "AUTO",
+                             font.label = list(color = "black"))
+
+ggsave(here("plots", 
+            "global_obs_pred_map.png"),plot = global_obs_pred, 
+       bg = "white", height = 4.5, width = 8.5, dpi = 600)
+
+```
+
+# Figure S7: Regional distributions of predicted %CC
+- Distributions of the baseline* predictions by region. 
+- Supplemental table providing the prediction range, median and 95% CI for each country as well.
+
+Use: gridded predictions for all three management categories
+
+```{r}
+
+predict_df %>% names()
+predict_df %>% tabyl(region)
+predict_df$pct_hardcoral_obs %>% max(na.rm=T)
+predict_df$pct_hardcoral_obs %>% min(na.rm=T)
+predict_df$pct_hardcoral_predicted %>% max(na.rm=T)
+predict_df$pct_hardcoral_predicted %>% min(na.rm=T)
+predict_df %>% 
+  group_by(region) %>% 
+  reframe(max_obs = max(pct_hardcoral_obs, na.rm=T))
+
+predict_df %>% 
+  ggplot(aes(x = objectid, y = pct_hardcoral_obs))
+
+
+regions <- sort(unique(predict_df$region) %>% as.character())
+
+plt_list = list()
+for(i in 1:length(regions)){
+  r = regions[i]
+  
+  # Predictions are already there; just look at Fiji more closely
+  region_df <- allreefs_pred %>% 
+    filter(region == r,
+           !is.na(pct_hardcoral_obs)) %>% 
+    mutate(cc_pred = pct_hardcoral_predicted*100, 
+           cc_pred_se = pct_hardcoral_predicted_se*100,
+           cc_pred_max = cc_pred + cc_pred_se, 
+           cc_pred_min = cc_pred - cc_pred_se, 
+           #cc_delta = cc_delta*100, 
+           cc_obs = pct_hardcoral_obs*100)
+  
+  ymax = max(region_df$cc_obs, na.rm=T)+5
+  
+  
+  # NOTE 6/17: FIX THIS PLOT so that the line goes from predicted +/- SE 
+  # (not including “observed”) value. (Want to include error in lollipop plots).
+
+  region_plt <- region_df %>% 
+    select(objectid, cc_obs, cc_pred, cc_pred_max, cc_pred_min) %>%
+    pivot_longer(-c(objectid, cc_pred_max, cc_pred_min), names_to = "var") %>% 
+    mutate(var = factor(var)) %>% 
+    left_join(region_df %>% select(objectid, cc_obs)) %>% 
+    ggplot(aes(x = reorder(objectid, cc_obs), y = value, 
+               colour = var, shape = var, linetype = "SE"))+
+    geom_segment(aes(y = cc_pred_min, yend = cc_pred_max), 
+                 color = "purple", lwd = 0.4, alpha = 0.7)+
+    geom_point(size = .9)+
+    scale_colour_manual(values = c("grey20","purple"), name = "", 
+                        labels = c("Observed", "Predicted"))+
+    scale_shape_manual(values = c(19, 21), name = "", 
+                        labels = c("Observed", "Predicted"))+
+    scale_linetype_manual(values = c(1), name = "")+
+    ylim(0,ymax)+
+    ylab("% live hardcoral")+
+    ggtitle(r)+
+    theme_bw()+
+    ylab("")+xlab("")+
+    theme(axis.text.x = element_blank(), 
+          axis.title.x = element_blank(),
+          panel.grid = element_line(linewidth=.1, color="gray80"))
+  
+  plot(region_plt)
+
+  plt_list[[i]] <- region_plt
+}
+
+
+png(here("plots","SM_plots",
+         "gcc_v1_4_obs_pred_regions.png"), 
+    res = 600, width = 10, height = 13, units = "in")
+
+# side by side: width = 17, height = 9
+#ggarrange(plt_list[4][[1]],plt_list[9][[1]],
+#          plt_list[3][[1]],plt_list[11][[1]],
+#          plt_list[2][[1]],plt_list[8][[1]],
+#          plt_list[6][[1]],plt_list[5][[1]],
+#          plt_list[1][[1]],plt_list[10][[1]],
+#          plt_list[7][[1]],
+#          nrow = 6, ncol = 2, widths = c(1.2,1),
+#          legend = "bottom", common.legend = T, labels = "AUTO")
+
+ggarrange(plotlist = plt_list[1:length(regions)],
+          nrow = length(regions), legend = "bottom", common.legend = T, 
+          labels = "AUTO")
+
+dev.off()
+         
+
+```
+
+
+# Figure S8: Regional summary of predicted %CC
+Of predicted coral cover under current conditions
+
+```{r}
+
+z_value <- qnorm(0.975)  # 95% confidence interval
+
+table_s6 <- predict_df %>% 
+  group_by(region) %>% 
+  reframe(cc_obs_median = median(pct_hardcoral_obs, na.rm=T),
+          cc_pred_median = median(pct_hardcoral_predicted, na.rm=T),
+          cc_pred_se_median = median(pct_hardcoral_predicted_se, na.rm=T),
+          cc_pred_ci_lower =  cc_pred_median - z_value * cc_pred_se_median, 
+          cc_pred_ci_upper = cc_pred_median + z_value * cc_pred_se_median, 
+          cc_pred_delta = abs(cc_pred_median - cc_obs_median)) %>% 
+  mutate(across(cc_obs_median:cc_pred_delta, ~ . * 100))
+
+table_s6
+  
+
+table_s6 %>% 
+  mutate(delta = cc_obs_median-cc_pred_median, 
+         better_worse = if_else(delta > 0, "Obs > Pred", "Pred > Obs")) %>% 
+  mutate(region = factor(region, levels = rev(levels(table_s6$region)))) %>% 
+  ggplot(aes(x = cc_obs_median, y = reorder(region,cc_obs_median)))+
+  geom_segment(aes(x = cc_pred_ci_lower, xend = cc_pred_ci_upper), 
+               color = "purple", lwd = 1)+
+  geom_point(aes(x = cc_pred_median), color = "purple", shape = 1, size = 3)+
+  geom_point(size = 3)+ 
+  geom_vline(xintercept = 30, lty = 2, color = "grey30")+
+  xlab("% Live hard coral")+ylab("")+
+  xlim(0,60)+
+  theme_bw()
+  #facet_wrap(~better_worse, ncol = 1, scales = "free_y")
+
+  
+ggsave(here("plots","SM_plots",
+         "FigS8_Regional_prediction_summary.png"), 
+       height = 5, width = 9)
+
+```
+# Paper stats
+```{r}
+predict_df %>% select(-geometry) %>% 
+  skim()
+
+sum(!is.na(predict_df$pct_hardcoral_predicted)) # number of cells with s0 predictions
+sum(!is.na(predict_df$pct_hardcoral_counterfac)) # number of cells with s1 predictions (8166)
+
+# number of cells per management category
+gcc_mdl_df %>% 
+  tabyl(mgmt_highest)
+
+gcc_mdl_df %>% 
+  tabyl(method_cat) 
+
+# number of countries, regions
+```
+
+## Table S7: site-level counterfactual predictions
+Used for supplementary table (Table S6)
+% of sites that fall above and below by focal country & management classification.
+by more than 2x global mean/median SE (~5%)
+```{r}
+# RESULTS
+counterfac_sites_df$pct_hardcoral_counterfac_se %>% mean(na.rm=T)
+counterfac_sites_df$pct_hardcoral_counterfac_se %>% median(na.rm=T)
+
+se2 <- counterfac_sites_df$pct_hardcoral_counterfac_se %>% mean(na.rm=T) *2
+
+conterfac_summary <- counterfac_sites_df %>% 
+  filter(country %in% c("Belize", "Fiji", "Tanzania")) %>% 
+  mutate(obs_v_pred = pct_hardcoral - pct_hardcoral_counterfac,
+         above_below_pred = case_when(obs_v_pred > se2 ~ "above", 
+                                      obs_v_pred < -1*se2 ~ "below", 
+                                      TRUE ~ "neither"))
+
+# Checks
+conterfac_summary %>% tabyl(above_below_pred)
+
+conterfac_summary %>% filter(above_below_pred == "above") %>% 
+  pull(obs_v_pred) %>% min()
+
+conterfac_summary %>% filter(above_below_pred == "below") %>% 
+  pull(obs_v_pred) %>% max()
+
+# table; temp
+conterfac_summary %>% tabyl(above_below_pred, country) %>% adorn_totals()
+
+# N sites above/below predicted by country & management cat
+conterfac_summary_total_sites <- conterfac_summary %>% 
+  group_by(country, mgmt_highest_orig) %>% 
+  reframe(total_sites = n())
+
+# final 
+conterfac_summary %>% 
+  group_by(country, above_below_pred, mgmt_highest_orig) %>% 
+  reframe(n_sites = n(), 
+            observed_mean = mean(pct_hardcoral, na.rm=T), 
+            predicted_mean = mean(pct_hardcoral_counterfac, na.rm=T)) %>% 
+  left_join(conterfac_summary_total_sites, by = c("country","mgmt_highest_orig")) %>% 
+  mutate(pct_total = n_sites/total_sites) %>% 
+  select(country, above_below_pred, mgmt_highest_orig,
+         n_sites,total_sites, pct_total, 
+         observed_mean, predicted_mean) %>% 
+  arrange(country, mgmt_highest_orig, above_below_pred) %>% 
+  view()
+
+# N sites above/below predicted by country only
+conterfac_summary_total_sites_c <- conterfac_summary %>% 
+  group_by(country) %>% 
+  reframe(total_sites = n())
+
+# final 
+conterfac_summary %>% 
+  group_by(country, above_below_pred) %>% 
+  reframe(n_sites = n(), 
+            observed_mean = mean(pct_hardcoral, na.rm=T), 
+            predicted_mean = mean(pct_hardcoral_counterfac, na.rm=T)) %>% 
+  left_join(conterfac_summary_total_sites_c, by = "country") %>% 
+  mutate(pct_total = n_sites/total_sites) %>% 
+  select(country, above_below_pred,
+         n_sites,total_sites, pct_total, 
+         predicted_mean, observed_mean) %>% 
+  arrange(country, above_below_pred) %>% 
+  view()
+
+```
+
+
