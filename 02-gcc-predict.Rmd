@@ -1,0 +1,328 @@
+---
+title: "02-gcc-predict.Rmd"
+author: "Whitney Friedman"
+date: '2024-05'
+output: html_document
+---
+# 02-gcc-predict.Rmd
+Using the GAM model (gcc_v1.4) developed in 01-gcc-v1-4-model.Rmd
+predict out to all local reef pressures ('lrp') coral reef cells, and
+to a subset of coral reef monitoring sites.
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load libraries & functions
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(here)
+source(here("00-load-cc-libraries.R"))
+library(mgcv)
+library(sf)
+
+# Load functions
+source(here("00-load-cc-functions.R"))
+```
+
+## Load GCC data
+```{r}
+# load formatted data from 04a
+lrp_gcc_df <- read_rds(here("outputs", "04a_lrp_gcc_df.RDS"))
+
+lrp_gcc_df %>% select(-geometry) %>% skim()
+
+lrp_gcc_sf <- read_rds(here("outputs", "04a_lrp_gcc_sf.RDS"))
+
+
+```
+
+## Load GAM model (gcc_v1.4)
+```{r}
+gcc_mdl <- read_rds(here("outputs","gcc_v1_4_gam.RDS"))
+
+gcc_mdl_df <- read_rds(here("outputs","gcc_v1_4_gam_df.RDS"))
+
+# read in final gam variables
+gcc_vars <- read_csv(here("intermediate-files","gam_vars_final.csv")) %>% 
+  pull(variable)
+
+gcc_vars
+
+summary(gcc_mdl)
+```
+
+## Load site data, join to gcc
+- Load site data
+- For sites with multiple surveys, use most recent
+- Spatial join with allreefs cells to get remaining data
+```{r}
+cc_dat <- read_rds(here("data","cc_surveys_combn.RDS")) %>% 
+  rename(mgmt_highest = mgmt_simple) %>% 
+  mutate(mgmt_highest = if_else(is.na(mgmt_highest), "open access", mgmt_highest), 
+         mgmt_highest = factor(mgmt_highest)) %>% 
+  # for sites with multiple surveys -- keep most recent
+  arrange(-year) %>% 
+  distinct(site, .keep_all = T) %>% 
+  st_as_sf(coords = c("longitude","latitude"), remove = F,
+           crs = 4326)
+
+cc_dat %>% tabyl(mgmt_highest)
+
+# join to GCC data 
+cc_allreefs <- cc_dat %>% 
+  st_join(lrp_gcc_sf %>% select(objectid, 
+                                     all_of(gcc_vars), 
+                                     -c(mgmt_highest, method_cat)), 
+          join = st_intersects) %>% 
+  select(-method)
+  
+cc_allreefs
+
+# check all variables are present: 
+gcc_vars %in% names(cc_allreefs)
+
+```
+
+
+# Predict CC globally (observed conditions)
+Predict to global 5km reef cells using all known values
+
+## Setup
+set up table to use for prediction; variable formatting etc. must match model inputs
+```{r}
+predict_df <- lrp_gcc_df %>% 
+  select(objectid, geometry, latitude, longitude, 
+         region, country, method_cat,
+         all_of(gcc_vars)) %>% 
+  mutate(method_cat = if_else(is.na(method_cat), "pitlitbleach", method_cat), 
+         method_cat = factor(method_cat))
+
+# check for completeness & compare to gcc_mdl_df for variable types
+predict_df %>% select(-geometry) %>% skim()
+predict_df %>% tabyl(method_cat)
+predict_df %>% tabyl(mgmt_highest)
+
+gcc_mdl_df %>% select(-geometry) %>% skim()
+
+```
+
+## Predict for allreefs
+Predict % live hard coral cover for all 5km grids with sufficient data 
+(n = 54,298, or 99.45% of all global reef cells
+Include standard error (SE) estimates
+```{r}
+# Baseline prediction
+# Use the GCC model to predict coral cover in cells with no data
+cc_pred <- predict.gam(gcc_mdl, type = "response", newdata=predict_df, se.fit = T)
+cc <- cc_pred[[1]]
+cc_se <- cc_pred[[2]]
+
+# quartiles of predicted cc 
+cc_pred_qt <- quantile(cc, na.rm=T)
+
+# create new data fram of predictions
+allreefs_cc <- predict_df %>% 
+  bind_cols(pct_hardcoral_predicted = cc) %>% 
+  bind_cols(pct_hardcoral_predicted_se = cc_se) %>% 
+  left_join(lrp_gcc_df[c("objectid","pct_hardcoral_transform")]) %>% 
+  rename(pct_hardcoral_obs = pct_hardcoral_transform) %>% 
+  # add predicted 'brightspots'
+  mutate(cc_pred_qt75 = if_else(pct_hardcoral_predicted >= cc_pred_qt[4], 1, 0))
+
+#allreefs_cc %>% head
+  
+# transform predictions to spatial data
+allreefs_cc_sf <- allreefs_cc %>% 
+  st_as_sf()
+
+# check CRS is '4326' (OK)
+st_crs(allreefs_cc_sf)
+
+```
+
+## Save predictions
+```{r}
+write_rds(allreefs_cc, here("outputs","allreefs_pred_cc.RDS"))
+
+write_rds(allreefs_cc_sf, here("outputs","allreefs_pred_cc_sf.RDS"))
+
+# SAVE as GEOJSON ----
+fn <- here("outputs",
+           "allreefs_pred_cc.geojson")
+
+if(file.exists(fn)){file.remove(fn)}
+
+allreefs_cc_sf %>% 
+  st_write(dsn = fn, layer = "all_reefs_pred_cc")
+
+```
+
+# Predict Counterfactual (grids)
+If there were NO management (in KNOWN management areas, (n = 8190 cells where 
+management is "restricted" or "no take")), what would predicted coral cover be? 
+- Restricted & No-take become OPEN ACCESS
+-- n = 8190 cells (about 15% of the data has partial/full restriction)
+-- Option: Use only cells where some management is taking place (n = 8190); 
+- Current: Making predictions for all possible cells with complete data (n = 54298), same as baseline prediction. Can subset later as needed.
+
+
+
+```{r}
+counterfac_df <- predict_df %>% 
+  # make all restricted or no-take areas == "open access" to represent the counterfactual
+  mutate(mgmt_highest_orig = mgmt_highest) %>% 
+  mutate(mgmt_highest = "open access", 
+         mgmt_highest = factor(mgmt_highest, levels = c("no take", "restricted", "open access")))
+
+counterfac_df %>% select(-geometry) %>% skim()
+
+counterfac_predict <- predict.gam(gcc_mdl, type = "response",
+                                  newdata=counterfac_df, se.fit = T)
+
+counterfac_df$pct_hardcoral_counterfac <- counterfac_predict[[1]]
+counterfac_df$pct_hardcoral_counterfac_se <- counterfac_predict[[2]]
+
+counterfac_df %>% filter(!is.na(pct_hardcoral_counterfac)) %>% nrow() # 54298
+
+counterfac_df %>% 
+  filter(mgmt_highest_orig %in% c("restricted","no take")) %>% 
+  filter(!is.na(pct_hardcoral_counterfac)) %>% 
+  nrow() # 8166
+
+```
+
+## Transform & save predictions
+```{r}
+
+# spatial transform
+counterfac_sf <- counterfac_df %>% 
+  st_as_sf()
+
+# check CRS is '4326' (OK)
+st_crs(counterfac_sf)
+
+# save predictions ---
+
+write_rds(counterfac_df, here("outputs","allreefs_counterfac.RDS"))
+
+write_rds(counterfac_sf, here("outputs","allreefs_counterfac_sf.RDS"))
+
+# SAVE as GEOJSON ----
+fn <- here("outputs",
+           "allreefs_counterfac.geojson")
+
+if(file.exists(fn)){file.remove(fn)}
+
+counterfac_sf %>% 
+  st_write(dsn = fn, layer = "allreefs_counterfac")
+
+
+```
+
+# Predict counterfactual - partial and full restrictions
+What happens to global (or regional) coral cover means with x,y,z % increase in partial or full restrictions?
+
+NOT IN USE
+
+```{r}
+vals <- c(0.10, 0.20, 0.30, 0.40, 0.50, 0.0)
+n_cells <- 54596
+
+
+# simplified: 
+s2_increased_mgmt <- 
+  data.frame(pr_restricted = c(vals, rep(0,5)),
+              pr_closed = c(rep(0,5),vals)) %>% 
+  as_tibble() %>% 
+  mutate(n_restricted = n_cells*pr_restricted, 
+         n_closed = n_cells*pr_closed) %>% 
+  mutate(cc_predicted = NA)
+
+for(i in 1:nrow(s2_increased_mgmt)){
+  cat("processing scenario",i,"...\n")
+  # open --> restricted
+  mgmt <- predict_df$mgmt_highest
+  open_access <- which(mgmt == "open access")
+  n_sample_r <- s2_increased_mgmt$n_restricted[i]
+  index_vals_r <- sample(open_access, n_sample_r, replace = F)
+  mgmt[index_vals_r] <- "restricted"
+  
+  # open --> closed
+  open_access2 <- which(mgmt == "open access")
+  n_sample_c <- s2_increased_mgmt$n_closed[i]
+  index_vals_c <- sample(open_access2, n_sample_c, replace = F)
+  mgmt[index_vals_c] <- "no take"
+  
+  
+  scenario_df <- predict_df %>%
+    mutate(mgmt_highest = mgmt)
+  
+  # Takes ~1min
+  scenario_predict <- predict.gam(gcc_mdl, type = "response", 
+                                  newdata=scenario_df, se.fit = F)
+  
+  s2_increased_mgmt$cc_predicted[i] <- scenario_predict %>% median(na.rm=T)
+}
+
+s2_increased_mgmt
+
+# plot results
+s2_increased_mgmt %>% 
+  pivot_longer(c(pr_restricted,pr_closed), names_to = "condition", values_to = "pr_change") %>%
+  filter(pr_change != 0) %>% 
+  ggplot(aes(x = pr_change, ymin = 0, ymax = cc_predicted, colour = condition, 
+             fill = condition))+
+  geom_ribbon(alpha = 0.6)
+
+```
+
+
+
+
+# Predict counterfactual (SITES)
+- Make counterfactual predictions for site-level data 
+  (for all site types: no-take, restricted, open-access)
+- NOTE: site level predictions are based on 5km resolution environmental (etc) data
+
+```{r}
+cc_allreefs
+
+counterfac_sites_df <- cc_allreefs %>% 
+  as_tibble() %>% 
+  select(site, country, latitude, longitude, pct_hardcoral, all_of(gcc_vars)) %>% 
+  mutate(pct_hardcoral = pct_hardcoral/100) %>% 
+  mutate(mgmt_highest_orig = mgmt_highest) %>% 
+  # make all restricted or no-take areas == "open access" to represent the counterfactual
+  mutate(mgmt_highest = "open access", 
+         mgmt_highest = factor(mgmt_highest, 
+                               levels = c("no take", "restricted", "open access")))
+
+# Checks
+counterfac_sites_df %>% tabyl(mgmt_highest)
+counterfac_sites_df %>% tabyl(mgmt_highest_orig) # should have ALL open access sites
+
+counterfac_sites_df%>% skim()
+
+counterfac_sites_predict <- predict.gam(gcc_mdl, 
+                                        type = "response",
+                                        newdata=counterfac_sites_df, 
+                                        se.fit = T)
+
+counterfac_sites_df$pct_hardcoral_counterfac <- counterfac_sites_predict[[1]]
+counterfac_sites_df$pct_hardcoral_counterfac_se <- counterfac_sites_predict[[2]]
+
+
+# save predictions
+write_rds(counterfac_sites_df, here("outputs","counterfac_sites_df.RDS"))
+
+
+```
+
+
+
+
+
+
+
+
