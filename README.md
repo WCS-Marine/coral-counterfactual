@@ -1,6 +1,6 @@
 # coral-counterfactual
 
-This repository corresponds to the model and analysis presented in Friedman and Darling, 2025 [forthcoming](add link)
+This repository corresponds to the model and analysis presented in Friedman and Darling, 2025 (forthcoming)
 
 We compiled a large global dataset of coral cover observations and apply statistical modelling to provide a first global model of total coral cover and counterfactual predictions, and show how these tools can be used to assess the impact of conservation interventions on coral reefs using case studies in three countries. Specifically, our objectives were to: 
 - i) develop a high-performance model of global hard coral cover from publicly available coral cover estimates and social-environmental global data layers
@@ -19,5 +19,5 @@ We make all data layers and source code freely available (see Data Availability)
 -- "pct_hardcoral_s1_no_mgmt": model predictions are displayed for all cells based on the "no management" scenario
 
 ## Data
-The globally gridded dataset is freely available for public use (Friedman and Darling 2024; [doi:10.5063/F1GX491S](doi:10.5063/F1GX491S))
+The globally gridded dataset is freely available for public use (Friedman and Darling 2024; [doi:10.5063/F1GX491S](https://knb.ecoinformatics.org/view/doi%3A10.5063%2FF1GX491S))
 
