@@ -1,6 +1,7 @@
 # Tables and Plots for GCC MS
 # W. Friedman 
 
+rm(list=ls()) 
 library(here)
 source(here("00-load-cc-libraries.R"))
 source(here("00-load-cc-functions.R"))
