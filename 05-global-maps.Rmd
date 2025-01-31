@@ -1,0 +1,129 @@
+---
+title: "07-global-maps.Rmd"
+author: "Whitney Friedman"
+output: html_document
+---
+
+# 07-global-maps
+Create global maps of gcc predictions 
+using the GAM model (gcc_v1.4) developed in 04a-gc-v1-4-model.Rmd
+
+# Setup
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## load libraries & functions
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(here)
+source(here("00-load-cc-libraries.R"))
+library(mgcv)
+library(sf)
+library(RColorBrewer)
+library(leaflet)
+library(leaflet.esri)
+library(htmlwidgets)
+# leaflet background tiles:
+# https://leaflet-extras.github.io/leaflet-providers/preview/index.html
+```
+
+## load allreefs predictions
+predicted coral cover for allreefs grid
+generated in 05-predict-allreefs.Rmd
+
+```{r}
+# Baseline prediction
+allreefs_pred <- read_rds(here("outputs","allreefs_pred_cc.RDS"))
+allreefs_pred %>% select(-geometry) %>% skim()
+
+# Counterfactual predictions - 5km cells
+allreefs_counterfac <- read_rds(here("outputs","allreefs_counterfac.RDS"))
+
+allreefs_counterfac %>% select(-geometry) %>% skim()
+
+predict_df <- allreefs_pred %>% 
+  left_join(allreefs_counterfac %>% select(objectid, pct_hardcoral_counterfac))
+
+predict_df %>% select(-geometry) %>% skim()
+
+predict_sf <- predict_df %>% 
+  st_as_sf()
+
+predict_sf
+
+```
+
+# Maps
+
+## allreefs predictions
+- make a global map we can zoom into.
+- predicted %cc and observed %cc
+```{r}
+
+predict_sf2 <- predict_sf %>% 
+  mutate(pct_hardcoral_obs = pct_hardcoral_obs*100, 
+         pct_hardcoral_predicted = pct_hardcoral_predicted*100, 
+         pct_hardcoral_counterfac = pct_hardcoral_counterfac*100)
+  
+# 9 colors; first 3 are red to yellow
+pal <- colorNumeric(c('#92032a','#fee08b','#ffffbf',
+                      "#7fcdbb","#41b6c4","#1d91c0", "#225ea8","#0c2c84",
+                      '#2d0355'), domain = seq(0,100,5))
+
+allreefs_cc_map <- leaflet(predict_sf2,
+                     options = leafletOptions(preferCanvas = TRUE)) %>% #faster
+  # center map on Indonesia
+  setView(126, -5, zoom = 6) %>% 
+  # background
+  addProviderTiles("CartoDB.DarkMatter", options = providerTileOptions(
+    updateWhenZooming = FALSE,       # map won't update tiles until zoom is done
+    updateWhenIdle    = FALSE)) %>%     # map won't load new tiles when panning
+  # % cc observed 
+  addPolygons(
+    color = "gray30", weight = .5, fillOpacity = 1,
+    fillColor = ~pal(pct_hardcoral_obs),
+    popup = paste(paste("Region:", predict_sf2$region),
+                  paste("Country:", predict_sf2$country),
+                  paste("Management:", predict_sf2$mgmt_highest),
+                  paste("%CC Obs:", round(predict_sf2$pct_hardcoral_obs, 3)),
+                  paste("%CC Pred:", round(predict_sf2$pct_hardcoral_predicted, 3)),
+                  sep = "<br/>"),    
+    group = "pct_hardcoral_obs") %>%
+  # % cc predicted (current conditions)
+  addPolygons(
+    color = "gray30", weight = .5, fillOpacity = 1,
+    fillColor = ~pal(pct_hardcoral_predicted),
+    popup = paste(paste("Region:", predict_sf2$region),
+                  paste("Country:", predict_sf2$country),
+                  paste("Management:", predict_sf2$mgmt_highest),
+                  paste("%CC Obs:", round(predict_sf2$pct_hardcoral_obs, 3)),
+                  paste("%CC Pred:", round(predict_sf2$pct_hardcoral_predicted, 3)),
+                  sep = "<br/>"),
+    group = "pct_hardcoral_s0_current") %>% 
+  # % cc predicted (counterfactual)
+    addPolygons(
+    color = "gray30", weight = .5, fillOpacity = 1,
+    fillColor = ~pal(pct_hardcoral_counterfac),
+    popup = paste(paste("Region:", predict_sf2$region),
+                  paste("Country:", predict_sf2$country),
+                  paste("Management:", predict_sf2$mgmt_highest),
+                  paste("%CC Obs:", round(predict_sf2$pct_hardcoral_obs, 3)),
+                  paste("%CC Pred (counterfac):", round(predict_sf2$pct_hardcoral_counterfac, 3)),
+                  sep = "<br/>"),
+    group = "pct_hardcoral_s1_no_mgmt") %>% 
+  # add legend
+  addLegend("bottomright", pal = pal, values = ~seq(0,100,5),
+    title = "% Live hard coral",
+    opacity = 1) %>%   
+  # add Layer controls
+  addLayersControl(overlayGroups=c("pct_hardcoral_obs",
+                                   "pct_hardcoral_s0_current",
+                                   "pct_hardcoral_s1_no_mgmt"),
+                 options=layersControlOptions(collapsed=F))
+
+# Save map (this takes awhile)
+saveWidget(allreefs_cc_map, file = here("maps", "gcc_v1_4_allreefs.html"),
+           title = "gcc_v1_4_allreefs")
+```
+
