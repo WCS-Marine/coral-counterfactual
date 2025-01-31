@@ -1,12 +1,14 @@
 ---
-title: "07-global-maps.Rmd"
+title: "05-global-maps.Rmd"
 author: "Whitney Friedman"
 output: html_document
 ---
 
-# 07-global-maps
+# 05-global-maps
 Create global maps of gcc predictions 
 using the GAM model (gcc_v1.4) developed in 04a-gc-v1-4-model.Rmd
+
+This script produces an html / leaflet map that can be viewed using a browser.
 
 # Setup
 ```{r setup, include=FALSE}
