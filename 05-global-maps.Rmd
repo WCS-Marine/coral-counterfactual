@@ -125,7 +125,8 @@ allreefs_cc_map <- leaflet(predict_sf2,
                  options=layersControlOptions(collapsed=F))
 
 # Save map (this takes awhile)
-saveWidget(allreefs_cc_map, file = here("maps", "gcc_v1_4_allreefs.html"),
+# NOTE: this is saved under the 'docs' folder to enable viewing via github
+saveWidget(allreefs_cc_map, file = here("docs", "gcc_v1_4_allreefs.html"),
            title = "gcc_v1_4_allreefs")
 ```
 

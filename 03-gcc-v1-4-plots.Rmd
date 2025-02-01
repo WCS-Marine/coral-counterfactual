@@ -131,8 +131,7 @@ counterfac_sites_df %>% tabyl(mgmt_highest_orig)
 load mapping files common across regions
 
 ```{r}
-world <- read_sf(here("globalprep","analysis","mapping","map_data","worldbank_hi_res",
-             "WB_countries_Admin0_10m.shp"))
+world <- read_sf(here("map-data","worldbank_hi_res","WB_countries_Admin0_10m.shp"))
 
 
 # plot(world,max.plot=1)

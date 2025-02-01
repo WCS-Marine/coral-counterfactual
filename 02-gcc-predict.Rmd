@@ -44,7 +44,7 @@ gcc_mdl <- read_rds(here("outputs","gcc_v1_4_gam.RDS"))
 gcc_mdl_df <- read_rds(here("outputs","gcc_v1_4_gam_df.RDS"))
 
 # read in final gam variables
-gcc_vars <- read_csv(here("intermediate-files","gam_vars_final.csv")) %>% 
+gcc_vars <- read_csv(here("outputs","gam_vars_final.csv")) %>% 
   pull(variable)
 
 gcc_vars
@@ -318,11 +318,5 @@ write_rds(counterfac_sites_df, here("outputs","counterfac_sites_df.RDS"))
 
 
 ```
-
-
-
-
-
-
 
 
