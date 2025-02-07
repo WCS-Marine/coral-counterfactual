@@ -5,19 +5,14 @@ library(lubridate)
 library(RColorBrewer)
 library(viridis) # plot colors
 library(raster)  # raster manipulation
-#library(rgdal)   # geospatial analysis
 library(sf)      # geospatial analysis
 library(knitr)   # tables
-#library(velox)   # geospatial analysis (not using?)
 library(conflicted)
 library(tidyverse)
 
 
 conflict_prefer("select", "dplyr") # (need to use raster::select for rasters)
 conflict_prefer("filter", "dplyr")
-
-# load "extract_values" function 
-# source(here("globalprep","analysis","coral-counterfactual","00-lp-extract-values.R"))
 
 # Plot themes and colors ----
 # Color Palette mapped to region
