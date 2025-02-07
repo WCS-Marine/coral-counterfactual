@@ -1,4 +1,4 @@
-# Tables and Plots for GCC MS
+# Additional tables and Plots for GCC MS
 # W. Friedman 
 
 rm(list=ls()) 
