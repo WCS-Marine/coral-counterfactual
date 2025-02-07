@@ -7,11 +7,11 @@
 # and management efforts. 
 #
 # In this script, we: 
-# Load observed CSV from MERMAID. 
-# Load global model results
-# Create maps
-# Create lollipop of differences
-# Create box plot by management type
+# Load a CSV of observed coral cover at the site-level
+# Create box plots of observed coral cover, by management type
+# Load global model ("GCC") results
+# Create maps of observed & predicted coral cover
+# Create lollipop of differences between observed & predicted coral cover
 # 
 # W. Friedman & E. Darling, 2025
 # -----------------------------------------------------------------------#
@@ -40,10 +40,17 @@ this_country <- "Belize"
 # 1. Load and review site-based data output from MERMAID ----
 # @EMILY: add code to pull directly from MERMAID?
 # Or, use a file of just 1 countries site data?
+#
+# WHEN loading data, 
+# NOTE the column names and formats of the example data and your data,
+# Need to ensure these align.
+# In particular, pct_hardcoral should be a value from 0-100.
 
 # Load the survey data
 surveys <- read_rds(here("data","cc_surveys_combn.RDS")) %>% 
   filter(country == this_country) %>% 
+  # Keep ONLY the columns needed here
+  select(country, site, year, latitude, longitude, pct_hardcoral, mgmt_simple, method_cat) %>% 
   rename(mgmt_highest = mgmt_simple) %>% 
   mutate(mgmt_highest = if_else(is.na(mgmt_highest), "open access", mgmt_highest), 
          mgmt_highest = factor(mgmt_highest, levels = c("no take", "restricted", "open access"))) %>% 
@@ -88,8 +95,7 @@ surveys_5km <- surveys %>%
   st_join(lrp_gcc_sf %>% select(objectid, 
                                 all_of(gcc_vars), 
                                 -c(mgmt_highest, method_cat)), 
-          join = st_intersects) %>% 
-  select(-method)
+          join = st_intersects)
 
 surveys_5km # WAS: cc_allreefs
 
@@ -210,7 +216,7 @@ predict_df <- allreefs_pred %>%
 rm(allreefs_pred,allreefs_counterfac)
 
 # Review
-predict_df %>% head()
+predict_df
 
 ## 5.2 Create maps ----
 
