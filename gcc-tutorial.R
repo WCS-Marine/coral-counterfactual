@@ -16,7 +16,7 @@
 # W. Friedman & E. Darling, 2025
 # -----------------------------------------------------------------------#
 
-# 0 Load libraries ----
+# 0. Load libraries ----
 library(here)
 library(tidyverse)
 library(sf)
@@ -253,18 +253,34 @@ country_plot <- ggplot(country_sf) +
 country_plot
 
 ## 5.3 Make summary figure ----
-# Combine the lollipop plots and map into a single figure 
-# HERE!! (fix margins, see code in 03-gcc...)
-ggarrange(country_plot, site_plt, nrow = 2)
+# Combine the lollipop plots and map into a single figure
+summary_fig <- ggarrange(country_plot, 
+          site_plt+ 
+            theme(plot.margin = unit(c(1,1,1,0.5), 'lines'), 
+                  legend.position = "none"), 
+          nrow = 2, 
+          heights = c(1,1.5))
+
+ggsave(here("plots","example-evaluation.png"),
+       plot = summary_fig,
+       height = 10, width = 8)
 
 # -------------------------------------------------------------------------#
+
 # 6. Summarise differences ----
 
-# Uncomment to use SE for this country
+# Set a threshold for the differential between predicted and observed that will
+# be used to determine whether a site is under/over performing based on expectations. 
+# We use 2x the global standard error of GCC predictions.
+se2 <- .0554 # global SE for predictions
+
+# Alternative: uncomment here to calculate SE for this country / these predictions
 # counterfac_sites_df$pct_hardcoral_counterfac_se %>% mean(na.rm=T)
 # counterfac_sites_df$pct_hardcoral_counterfac_se %>% median(na.rm=T)
 # se2 <- counterfac_sites_df$pct_hardcoral_counterfac_se %>% mean(na.rm=T) *2
-se2 <- .0554 # global SE for predictions
+
+# Create a table identifying the sites that fall above or below 
+# the predicted coral cover
 
 conterfac_summary <- counterfac_sites_df %>% 
   mutate(obs_v_pred = pct_hardcoral - pct_hardcoral_counterfac,
@@ -272,45 +288,21 @@ conterfac_summary <- counterfac_sites_df %>%
                                       obs_v_pred < -1*se2 ~ "below", 
                                       TRUE ~ "neither"))
 
-# Checks
+# Review
 conterfac_summary %>% tabyl(above_below_pred)
+conterfac_summary %>% select(country, site, pct_hardcoral, 
+                             pct_hardcoral_counterfac, above_below_pred)
 
-# table; temp
-conterfac_summary %>% tabyl(above_below_pred, country) %>% adorn_totals()
+# Summary table: number of sites above/below predicted by management cat
 
-# N sites above/below predicted by country & management cat
-conterfac_summary_total_sites <- conterfac_summary %>% 
-  group_by(country, mgmt_highest_orig) %>% 
-  reframe(total_sites = n())
-
-# final 
-conterfac_summary %>% 
-  group_by(country, above_below_pred, mgmt_highest_orig) %>% 
-  reframe(n_sites = n(), 
-          observed_mean = mean(pct_hardcoral, na.rm=T), 
-          predicted_mean = mean(pct_hardcoral_counterfac, na.rm=T)) %>% 
-  left_join(conterfac_summary_total_sites, by = c("country","mgmt_highest_orig")) %>% 
-  mutate(pct_total = n_sites/total_sites) %>% 
-  select(country, above_below_pred, mgmt_highest_orig,
-         n_sites,total_sites, pct_total, 
-         observed_mean, predicted_mean) %>% 
-  arrange(country, mgmt_highest_orig, above_below_pred)
-
-# N sites above/below predicted by country only
-conterfac_summary_total_sites_c <- conterfac_summary %>% 
-  group_by(country) %>% 
-  reframe(total_sites = n())
-
-# Summary table 
 conterfac_summary %>% 
   group_by(country, above_below_pred) %>% 
   reframe(n_sites = n(), 
-          observed_mean = mean(pct_hardcoral, na.rm=T), 
-          predicted_mean = mean(pct_hardcoral_counterfac, na.rm=T)) %>% 
-  left_join(conterfac_summary_total_sites_c, by = "country") %>% 
-  mutate(pct_total = n_sites/total_sites) %>% 
+          observed_mean_cc = mean(pct_hardcoral, na.rm=T), 
+          predicted_mean_cc = mean(pct_hardcoral_counterfac, na.rm=T)) %>% 
+  mutate(pct_total_sites = n_sites/nrow(counterfac_sites_df)) %>% 
   select(country, above_below_pred,
-         n_sites,total_sites, pct_total, 
-         predicted_mean, observed_mean) %>% 
+         n_sites, pct_total_sites, 
+         predicted_mean_cc, observed_mean_cc) %>% 
   arrange(country, above_below_pred)
 
