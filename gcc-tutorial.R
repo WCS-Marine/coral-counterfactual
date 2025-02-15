@@ -22,6 +22,8 @@ library(tidyverse)
 library(sf)
 library(skimr)
 library(ggpubr)
+library(readxl)
+library(janitor)
 
 # colors for plotting coral cover 
 map_cols <- c('#92032a','#fee08b','#ffffbf',
@@ -40,36 +42,65 @@ this_country <- "Belize"
 # 1. Load and review site-based data output from MERMAID ----
 # @EMILY: add code to pull directly from MERMAID?
 # Or, use a file of just 1 countries site data?
-#
+
+mermaid_data <- read_excel(here("belize_glovers_atoll_2024_benthicpit_25_02_15.xlsx"), 
+                           sheet = "Benthic PIT SE") %>% 
+  janitor::clean_names()
+
+mermaid_data
+names(mermaid_data)
+
+mermaid_data %>% 
+  tabyl(management_rules)
+
 # WHEN loading data, 
 # NOTE the column names and formats of the example data and your data,
 # Need to ensure these align.
 # In particular, pct_hardcoral should be a value from 0-100.
 
 # Load the survey data
-surveys <- read_rds(here("data","cc_surveys_combn.RDS")) %>% 
-  filter(country == this_country) %>% 
+here()
+surveys <- #read_rds(here("data","cc_surveys_combn.RDS")) %>% 
+  #filter(country == this_country) %>% 
+  mermaid_data %>% 
   # Keep ONLY the columns needed here
-  select(country, site, year, latitude, longitude, pct_hardcoral, mgmt_simple, method_cat) %>% 
-  rename(mgmt_highest = mgmt_simple) %>% 
-  mutate(mgmt_highest = if_else(is.na(mgmt_highest), "open access", mgmt_highest), 
-         mgmt_highest = factor(mgmt_highest, levels = c("no take", "restricted", "open access"))) %>% 
-  # For sites with multiple surveys - keep the most recent
-  # Alternatively, you may want to take an overall median for recent survey years
-  # however you choose to do this, you need to get to one value per row (site) here
-  arrange(-year) %>% 
-  distinct(site, .keep_all = T) %>% 
+  select(country, 
+         site, 
+         year, 
+         latitude, 
+         longitude, 
+         #pct_hardcoral, 
+         percent_cover_by_benthic_category_average_hard_coral,
+         management_rules, 
+         #mgmt_simple, method_cat
+         )   %>% 
   # Convert to a spatial data frame
   st_as_sf(coords = c("longitude","latitude"), remove = F,
-           crs = 4326)
+         crs = 4326)
+
+
+#optional edits
+
+#address mangement, rename and refactor 
+  #rename(mgmt_highest = mgmt_simple) %>% 
+  #mutate(mgmt_highest = if_else(is.na(mgmt_highest), "open access", mgmt_highest)), 
+  #mutate(management_rules = factor(management_rules, levels = c("no take", "restricted", "open access"))) %>% 
+
+# For sites with multiple surveys - keep the most recent
+  # Alternatively, you may want to take an overall median for recent survey years
+  # however you choose to do this, you need to get to one value per row (site) here
+  #arrange(-year) %>% 
+  #distinct(site, .keep_all = T) 
 
 # Review survey data
 surveys %>% head()
 surveys %>% select(-geometry) %>% skim()
-surveys %>% tabyl(mgmt_highest)
+surveys %>% tabyl(management_rules)
 
 # Plot survey data
-surveys %>% ggplot(aes(x = mgmt_highest, y = pct_hardcoral, fill = mgmt_highest))+
+surveys %>% ggplot(aes(x = management_rules, 
+                       y = percent_cover_by_benthic_category_average_hard_coral, 
+                       fill = management_rules))+
   geom_boxplot()+
   scale_fill_manual(values = c("dodgerblue","purple","grey"))+
   ggtitle("Survey data")+
