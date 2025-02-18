@@ -4,8 +4,9 @@
 .Ruserdata
 .DS_Store
 
-# should be able to ignore outputs file as its regenerated in scripts
-data/
-outputs/
-intermediate-files/
-map-data/
+# Error: GH001: Large files detected. 
+# File  data/allreefs_gcc.geojson is 104.36 MB; 
+# this exceeds GitHub's file size limit of 100.00 MB
+# ingore it; other versions are present
+
+data/allreefs_gcc.geojson
