@@ -22,6 +22,9 @@ library(tidyverse)
 library(sf)
 library(skimr)
 library(ggpubr)
+library(readxl)
+library(janitor)
+library(mgcv)
 
 # colors for plotting coral cover 
 map_cols <- c('#92032a','#fee08b','#ffffbf',
@@ -33,44 +36,101 @@ map_cols <- c('#92032a','#fee08b','#ffffbf',
 # This will be used to filter the global 5km coral predictions; 
 # making smaller files that will make this file faster to run. 
 
-this_country <- "Belize"
+#this_country <- "Belize"
+library(mermaidr)
 
 # ---------------------------------------#
 
 # 1. Load and review site-based data output from MERMAID ----
 # @EMILY: add code to pull directly from MERMAID?
-# Or, use a file of just 1 countries site data?
-#
+# Or, use a file of just 1 countries site data
+
+mermaid_data <- read_csv(here("wcs-coral-data-28mar2025.csv")) %>% 
+  clean_names()
+names(mermaid_data)
+head(mermaid_data)
+
+mermaid_data %>% 
+  tabyl(management_rules) %>% 
+  write_csv(here("wcs-coral-mgmt-summary.csv"))
+
+mermaid_data %>% 
+  tabyl(protocol)
+
+  
+
+#need year and rename columns
+#clean up to simple management rules
+mermaid_data <- mermaid_data %>% 
+  mutate(year = lubridate::year(sample_date), 
+         pct_hardcoral = hard_coral_cover, 
+         method_cat = protocol, 
+         management_rules_original = management_rules, 
+         mgmt_simple = case_when(management_rules == "no take" ~ "no take", 
+                                      management_rules == "open access" ~ "open access", 
+                                      TRUE ~ "restricted"), 
+         method_cat = case_when(str_detect(method_cat, "benthicpqt") ~ "photo", 
+                                TRUE ~ "pitlitbleach"), 
+         mgmt_simple = factor(mgmt_simple, levels = c("no take", "restricted", "open access")))
+         
+
+mermaid_data %>% 
+  tabyl(management_rules)
+
+mermaid_data %>% 
+  tabyl(mgmt_simple)
+
+mermaid_data %>% 
+  tabyl(method_cat)
+
+skim(mermaid_data$pct_hardcoral)
+
 # WHEN loading data, 
 # NOTE the column names and formats of the example data and your data,
 # Need to ensure these align.
 # In particular, pct_hardcoral should be a value from 0-100.
 
 # Load the survey data
-surveys <- read_rds(here("data","cc_surveys_combn.RDS")) %>% 
-  filter(country == this_country) %>% 
+here()
+surveys <- #read_rds(here("data","cc_surveys_combn.RDS")) %>% 
+  #filter(country == this_country) %>% 
+  mermaid_data %>% 
   # Keep ONLY the columns needed here
-  select(country, site, year, latitude, longitude, pct_hardcoral, mgmt_simple, method_cat) %>% 
+  select(country, 
+         site, 
+         year, 
+         latitude, 
+         longitude, 
+         pct_hardcoral, 
+         management_rules, 
+         mgmt_simple, 
+         method_cat)   %>%
   rename(mgmt_highest = mgmt_simple) %>% 
-  mutate(mgmt_highest = if_else(is.na(mgmt_highest), "open access", mgmt_highest), 
-         mgmt_highest = factor(mgmt_highest, levels = c("no take", "restricted", "open access"))) %>% 
-  # For sites with multiple surveys - keep the most recent
-  # Alternatively, you may want to take an overall median for recent survey years
-  # however you choose to do this, you need to get to one value per row (site) here
-  arrange(-year) %>% 
-  distinct(site, .keep_all = T) %>% 
   # Convert to a spatial data frame
   st_as_sf(coords = c("longitude","latitude"), remove = F,
-           crs = 4326)
+         crs = 4326)
+
+
+#address management, rename and refactor 
+  
+  #mutate(mgmt_highest = if_else(is.na(mgmt_highest), "open access", mgmt_highest)), 
+  
+
+# For sites with multiple surveys - keep the most recent
+  # Alternatively, you may want to take an overall median for recent survey years
+  # however you choose to do this, you need to get to one value per row (site) here
+  #arrange(-year) %>% 
+  #distinct(site, .keep_all = T) 
 
 # Review survey data
 surveys %>% head()
 surveys %>% select(-geometry) %>% skim()
 surveys %>% tabyl(mgmt_highest)
-surveys %>% tabyl(method_cat)
 
 # Plot survey data
-surveys %>% ggplot(aes(x = mgmt_highest, y = pct_hardcoral, fill = mgmt_highest))+
+surveys %>% ggplot(aes(x = mgmt_highest, 
+                       y = pct_hardcoral, 
+                       fill = mgmt_highest))+
   geom_boxplot()+
   scale_fill_manual(values = c("dodgerblue","purple","grey"))+
   ggtitle("Survey data")+
@@ -78,13 +138,28 @@ surveys %>% ggplot(aes(x = mgmt_highest, y = pct_hardcoral, fill = mgmt_highest)
   xlab("Management")+
   theme_light()
 
+# Plot survey data by country
+surveys %>% 
+  tabyl(country)
+
+surveys %>% ggplot(aes(x = mgmt_highest, 
+                       y = pct_hardcoral, 
+                       fill = mgmt_highest)) +
+  geom_boxplot()+
+  scale_fill_manual(values = c("dodgerblue","purple","grey"))+
+  ggtitle("Survey data")+
+  ylab("Percent live hardcoral (observed)")+
+  xlab("Management")+
+  theme_light() + 
+  facet_wrap(~country)
+
 
 # ---------------------------------------------------------------------------- #
 # 2. Align the site-based survey data with the 5km coral grids and associated data ----
 
 # Load the GCC model data, filter to this country:
-lrp_gcc_sf <- read_rds(here("outputs", "04a_lrp_gcc_sf.RDS")) %>% 
-  filter(country == this_country)
+lrp_gcc_sf <- read_rds(here("outputs", "04a_lrp_gcc_sf.RDS")) #%>% 
+  #filter(country == this_country)
 
 # Load GCC model variables:
 gcc_vars <- read_csv(here("outputs","gam_vars_final.csv")) %>% 
@@ -110,10 +185,13 @@ surveys_5km # WAS: cc_allreefs
 # biophysical and human pressure variables for those grids. 
 
 ## 3.1. Prep data ----
+names(surveys_5km)
+
+
 # Create the a table representing the counterfactual prediction of "no management":
 counterfac_sites_df <- surveys_5km %>% 
   as_tibble() %>% 
-  select(site, country, latitude, longitude, pct_hardcoral, all_of(gcc_vars)) %>% 
+  select(site, year, country, latitude, longitude, pct_hardcoral, all_of(gcc_vars)) %>% 
   mutate(pct_hardcoral = pct_hardcoral/100) %>% 
   # Save the observed management type
   mutate(mgmt_highest_orig = mgmt_highest) %>% 
@@ -156,7 +234,16 @@ country_df_pred <- counterfac_sites_df %>%
          cc_pred_max = cc_pred + cc_pred_se, 
          cc_pred_min = cc_pred - cc_pred_se)
 
+head(country_df_pred)
+view(country_df_pred)
+names(country_df_pred)
+
+country_df_pred
+
+#by management
 site_plt <- country_df_pred %>%
+  filter(country == "Kenya") %>% 
+  #filter(str_detect(site, "VIR")) %>% 
   ggplot(aes(y = reorder(site, cc_obs), x = cc_obs, shape = mgmt_highest_orig))+
   # segment from obs to predicted:
   geom_segment(aes(y = reorder(site, cc_obs), xend = cc_pred), 
@@ -175,6 +262,7 @@ site_plt <- country_df_pred %>%
   guides(shape = "none")+
   facet_wrap(~mgmt_highest_orig, nrow = 3, scales = "free_y",
              strip.position = "right")+
+  #facet_grid(year~mgmt_highest_orig, scales = "free_y")+
   xlab("% Live hard coral")+
   xlim(0,85)+
   scale_y_discrete(position = "right")+
@@ -186,6 +274,124 @@ site_plt <- country_df_pred %>%
         legend.position = "bottom")
 
 site_plt
+
+#by year
+site_plt <- country_df_pred %>%
+  filter(country == "Fiji") %>% 
+  filter(site == "VIR11") %>% 
+  ggplot(aes(y = reorder(site, cc_obs), x = cc_obs, shape = mgmt_highest_orig))+
+  # segment from obs to predicted:
+  geom_segment(aes(y = reorder(site, cc_obs), xend = cc_pred), 
+               colour = "gray60", lwd = 0.4)+
+  # segment from pred_min to pred_max
+  geom_segment(aes(y = reorder(site, cc_obs), x = cc_pred_min, 
+                   xend = cc_pred_max), 
+               lwd = 0.5, colour = "black")+
+  # add predicted points
+  geom_point(aes(y = reorder(site, cc_obs), x = cc_pred), size = 2, color = "black", fill = "black", stroke = 0)+
+  # add observed points, colored by % coral 
+  geom_point(aes(fill = cc_obs), size = 2, color = "gray50", stroke = 0.2)+
+  scale_fill_gradientn(colours = map_cols, limits = c(0,100), na.value = "gray90",
+                       name = "% Live hard coral observed")+
+  scale_shape_manual(values = c(21, 24, 22))+
+  guides(shape = "none")+
+  # facet_wrap(~mgmt_highest_orig, nrow = 3, scales = "free_y",
+  #            strip.position = "right")+
+  facet_grid(year~mgmt_highest_orig, scales = "free_y")+
+  xlab("% Live hard coral")+
+  xlim(0,85)+
+  scale_y_discrete(position = "right")+
+  ggtitle(label = "", subtitle = "Impact Assessment")+
+  theme_light()+
+  theme(panel.grid.major = element_line(linewidth =.1, color="gray90"), 
+        axis.text.y = element_text(size = 5), 
+        axis.title.y = element_blank(),
+        legend.position = "bottom")
+
+site_plt
+
+#subset to most recent year for each site 
+country_df_pred
+
+latest_surveys <- country_df_pred %>%
+  group_by(site) %>%
+  slice_max(order_by = year, n = 1, with_ties = FALSE) %>%
+  ungroup() %>% 
+  filter(!country %in% c("Mauritius", "Maldives"))
+
+latest_surveys
+skim(latest_surveys$year)
+
+#how many of latest surveys are above counterfactual? 
+names(latest_surveys)
+
+test <- latest_surveys %>%
+  mutate(
+    ci_lower = pct_hardcoral_counterfac - 1.96 * pct_hardcoral_counterfac_se,
+    ci_upper = pct_hardcoral_counterfac + 1.96 * pct_hardcoral_counterfac_se,
+    comparison = case_when(
+      pct_hardcoral > ci_upper ~ "above counterfactual",
+      pct_hardcoral < ci_lower ~ "below counterfactual",
+      TRUE ~ "not significantly different"
+    )
+  )
+
+test %>%
+  tabyl(country, comparison) %>%
+  adorn_percentages("row") %>%
+  adorn_pct_formatting(digits = 1) %>%
+  adorn_ns() %>% 
+  arrange(desc(`above counterfactual`)) 
+
+
+# Step 1 & 2: Create management group and comparison to counterfactual
+latest_surveys <- latest_surveys %>%
+  mutate(
+    mgmt_group = case_when(
+      mgmt_highest_orig == "open access" ~ "open access",
+      mgmt_highest_orig %in% c("restricted", "no take") ~ "restricted or no take"
+    ),
+    ci_lower = pct_hardcoral_counterfac - 1.96 * pct_hardcoral_counterfac_se,
+    ci_upper = pct_hardcoral_counterfac + 1.96 * pct_hardcoral_counterfac_se,
+    comparison = case_when(
+      pct_hardcoral > ci_upper ~ "above counterfactual",
+      pct_hardcoral < ci_lower ~ "below counterfactual",
+      TRUE ~ "not significantly different"
+    )
+  )
+
+# Step 3: Summary by management group
+mgmt_summary <- latest_surveys %>%
+  filter(!is.na(mgmt_group)) %>%
+  group_by(mgmt_group) %>%
+  summarise(
+    total_sites = n(),
+    sites_above = sum(comparison == "above counterfactual"),
+    percent_above = round(100 * sites_above / total_sites, 1),
+    .groups = "drop"
+  )
+
+mgmt_summary %>% 
+  view()
+
+
+# Step 4: Summary by country and management group
+mgmt_country_summary <- latest_surveys %>%
+  filter(!is.na(mgmt_group)) %>%
+  group_by(country, mgmt_group) %>%
+  summarise(
+    total_sites = n(),
+    sites_above = sum(comparison == "above counterfactual"),
+    percent_above = round(100 * sites_above / total_sites, 1),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(percent_above))
+
+mgmt_country_summary %>% 
+  filter(mgmt_group != "open access") %>% 
+  view()
+
+
 
 
 # 5. Create maps showing observed and predicted coral cover ----

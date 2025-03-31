@@ -1,0 +1,16 @@
+management_rules,new label,n,percent
+access restriction,access restriction,633,0.2518901711102268
+gear restriction,gear restriction,290,0.11539992041384799
+"gear restriction, access restriction",access restriction,18,0.007162754
+"gear restriction, periodic closure",periodic closure,1,3.979307600477517e-4
+"gear restriction, periodic closure, size limits, access restriction",periodic closure,6,0.002387585
+"gear restriction, size limits",gear restriction,70,0.027855153203342618
+"gear restriction, size limits, access restriction",access restriction,26,0.010346199761241544
+"gear restriction, size limits, species restriction",gear restriction,15,0.005968961
+"gear restriction, size limits, species restriction, access restriction",access restriction,27,0.010744130521289296
+"gear restriction, species restriction",gear restriction,8,0.003183446
+"gear restriction, species restriction, access restriction",access restriction,6,0.002387585
+no take,no take,743,0.29566255471547953
+open access,open access,465,0.18503780342220455
+periodic closure,periodic closure,96,0.038201352964584163
+"periodic closure, access restriction",periodic closure,109,0.043374452845204935
